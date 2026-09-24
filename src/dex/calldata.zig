@@ -745,7 +745,8 @@ fn parseV3ExactOutputSingle(data: []const u8, has_deadline: bool) ?V3ExactOutput
     };
 }
 
-fn parseV3ExactInput(data: []const u8, has_deadline: bool) ?V3ExactInput {
+/// Shared with routers.zig (Slipstream uses the same layout).
+pub fn parseV3ExactInput(data: []const u8, has_deadline: bool) ?V3ExactInput {
     const args_base: usize = 4;
     const off = readOffset(data, args_base) orelse return null;
     const t = addChecked(args_base, off) orelse return null;
@@ -763,7 +764,8 @@ fn parseV3ExactInput(data: []const u8, has_deadline: bool) ?V3ExactInput {
     return .{ .path = .{ .bytes = path_bytes }, .recipient = recipient, .deadline = deadline, .amount_in = amount_in, .amount_out_minimum = amount_out_minimum };
 }
 
-fn parseV3ExactOutput(data: []const u8, has_deadline: bool) ?V3ExactOutput {
+/// Shared with routers.zig (Slipstream uses the same layout).
+pub fn parseV3ExactOutput(data: []const u8, has_deadline: bool) ?V3ExactOutput {
     const args_base: usize = 4;
     const off = readOffset(data, args_base) orelse return null;
     const t = addChecked(args_base, off) orelse return null;

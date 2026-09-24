@@ -409,35 +409,6 @@ fn parseSlipstreamExactOutputSingle(data: []const u8) ?SlipstreamExactOutputSing
     };
 }
 
-/// `exactInput((bytes,address,uint256,uint256,uint256))`, V3-path shaped:
-/// same layout and validation as `calldata.zig`'s `parseV3ExactInput`
-/// (which is private), reused here for the Slipstream and Camelot V3 tags.
-fn parseV3PathExactInput(data: []const u8) ?calldata.V3ExactInput {
-    const args_base: usize = 4;
-    const off = reader.readOffset(data, args_base) orelse return null;
-    const t = reader.addChecked(args_base, off) orelse return null;
-    const path_bytes = reader.bytesAt(data, t, t) orelse return null;
-    if (reader.v3PathHops(path_bytes.len) == null) return null;
-    const recipient = reader.readAddressAt(data, t + 32) orelse return null;
-    const deadline = reader.readU256At(data, t + 64) orelse return null;
-    const amount_in = reader.readU256At(data, t + 96) orelse return null;
-    const amount_out_minimum = reader.readU256At(data, t + 128) orelse return null;
-    return .{ .path = .{ .bytes = path_bytes }, .recipient = recipient, .deadline = deadline, .amount_in = amount_in, .amount_out_minimum = amount_out_minimum };
-}
-
-fn parseV3PathExactOutput(data: []const u8) ?calldata.V3ExactOutput {
-    const args_base: usize = 4;
-    const off = reader.readOffset(data, args_base) orelse return null;
-    const t = reader.addChecked(args_base, off) orelse return null;
-    const path_bytes = reader.bytesAt(data, t, t) orelse return null;
-    if (reader.v3PathHops(path_bytes.len) == null) return null;
-    const recipient = reader.readAddressAt(data, t + 32) orelse return null;
-    const deadline = reader.readU256At(data, t + 64) orelse return null;
-    const amount_out = reader.readU256At(data, t + 96) orelse return null;
-    const amount_in_maximum = reader.readU256At(data, t + 128) orelse return null;
-    return .{ .path = .{ .bytes = path_bytes }, .recipient = recipient, .deadline = deadline, .amount_out = amount_out, .amount_in_maximum = amount_in_maximum };
-}
-
 // ============================================================================
 // Decoding: Camelot V2 Router
 // ============================================================================
@@ -623,10 +594,10 @@ fn decodeSlipstreamInner(data: []const u8, sel: u32) ?Decoded {
         return Decoded{ .slipstream_exact_output_single = parseSlipstreamExactOutputSingle(data) orelse return null };
     }
     if (sel == reader.selU32(calldata.selectors.exact_input)) {
-        return Decoded{ .slipstream_exact_input = parseV3PathExactInput(data) orelse return null };
+        return Decoded{ .slipstream_exact_input = calldata.parseV3ExactInput(data, true) orelse return null };
     }
     if (sel == reader.selU32(calldata.selectors.exact_output)) {
-        return Decoded{ .slipstream_exact_output = parseV3PathExactOutput(data) orelse return null };
+        return Decoded{ .slipstream_exact_output = calldata.parseV3ExactOutput(data, true) orelse return null };
     }
     return null;
 }
