@@ -44,8 +44,15 @@
 //! Universal Router or V2Router02 execute are rejected: dirty address or
 //! bool padding bits, V3 paths with trailing bytes, and short static command
 //! inputs. One rejected command makes the whole `execute` or `multicall`
-//! null. `PAY_PORTION_FULL_PRECISION` (`0x07`) and other untyped Universal
-//! Router commands arrive as `.other`.
+//! null. `V4_SWAP` (`0x10`) and the Permit2 commands are typed.
+//! `PAY_PORTION_FULL_PRECISION` (`0x07`) is `.other`: the deployed router
+//! reverts `InvalidCommandType(7)` before executing it. PancakeSwap
+//! Infinity's `0x10`, the UR position-manager commands and other NFT
+//! commands are also `.other`. `decode()` assumes the `.uniswap` dialect
+//! (0x10 is `V4_SWAP`), so it returns null for a pre-V4 router's calldata
+//! carrying an NFT command `0x10`; use
+//! `decodeFor(routerAt(chain_id, address).?.router, data)` for those
+//! routers.
 
 const std = @import("std");
 const keccak = @import("../keccak.zig");
@@ -328,11 +335,15 @@ pub const Multicall = struct {
         router: routers.Router = .uniswap,
         index: usize = 0,
 
+        /// `self.router` is public and may have been changed since
+        /// construction; if the call no longer re-decodes under it, it
+        /// yields `.other` instead of panicking.
         pub fn next(self: *Iterator) ?Call {
             if (self.index >= self.calls.len()) return null;
             const inner = self.calls.get(self.index);
             self.index += 1;
-            return decodeMulticallInner(self.router, inner) orelse unreachable;
+            return decodeMulticallInner(self.router, inner) orelse
+                Call{ .other = .{ .selector = inner[0..4].*, .data = inner } };
         }
     };
 };
@@ -344,7 +355,9 @@ pub const Multicall = struct {
 /// Universal Router command types, from Commands.sol.
 pub const command_types = struct {
     pub const flag_allow_revert: u8 = 0x80;
-    pub const command_type_mask: u8 = 0x7f;
+    /// Every dialect's deployed Universal Router masks the command byte to
+    /// 6 bits (0x66a9893c...'s bytecode: `603f8760f81c16`).
+    pub const command_type_mask: u8 = 0x3f;
 
     pub const v3_swap_exact_in: u8 = 0x00;
     pub const v3_swap_exact_out: u8 = 0x01;
@@ -362,7 +375,6 @@ pub const command_types = struct {
 const ur_cmd = struct {
     const permit2_transfer_from: u8 = 0x02;
     const permit2_permit_batch: u8 = 0x03;
-    const pay_portion_full_precision: u8 = 0x07;
     const permit2_permit: u8 = 0x0a;
     const permit2_transfer_from_batch: u8 = 0x0d;
     const balance_check_erc20: u8 = 0x0e;
@@ -375,8 +387,9 @@ const ur_cmd = struct {
 /// Which command table a Universal Router deployment uses. The same command
 /// byte means different things on different deployments.
 pub const UrDialect = enum {
-    /// Uniswap UR with V4 (Commands.sol @ a9c574f): type mask 0x7f, 0x10
-    /// V4_SWAP, 0x21 EXECUTE_SUB_PLAN. What `decode` assumes.
+    /// Uniswap UR (deployed 0x66a9893cC07D91D95644AEDD05D03f95e1dBA8Af
+    /// bytecode: type mask 0x3f via `603f8760f81c16`): 0x10 V4_SWAP, 0x21
+    /// EXECUTE_SUB_PLAN. What `decode` assumes.
     uniswap,
     /// Pre-V4 Uniswap UR (Commands.sol @ v1.6.0 41183d6, e.g. 0x3fC91A3a…7FAD):
     /// type mask 0x3f, same 0x00-0x0e commands, 0x10-0x20 and 0x22 are NFT and
@@ -388,14 +401,6 @@ pub const UrDialect = enum {
     /// `.other`, as is every other command.
     pancake,
 };
-
-/// The command-type mask a dialect's command table uses.
-fn commandTypeMask(dialect: UrDialect) u8 {
-    return switch (dialect) {
-        .uniswap => command_types.command_type_mask,
-        .uniswap_v1, .pancake => 0x3f,
-    };
-}
 
 /// Universal Router `execute`. `deadline` is null for `execute(bytes,bytes[])`
 /// and for a sub-plan.
@@ -421,13 +426,18 @@ pub const UniversalRouterExecute = struct {
         is_sub_plan: bool = false,
         index: usize = 0,
 
+        /// `self.dialect`/`self.is_sub_plan` are public and may have been
+        /// changed since construction; if the command no longer re-parses
+        /// under them, it yields `.other` with its raw input instead of
+        /// panicking.
         pub fn next(self: *Iterator) ?Command {
             if (self.index >= self.commands.len) return null;
             const raw = self.commands[self.index];
             const input = self.inputs.get(self.index);
             self.index += 1;
-            const command_type = raw & commandTypeMask(self.dialect);
-            const payload = parseCommandPayload(self.dialect, self.is_sub_plan, command_type, input) orelse unreachable;
+            const command_type = raw & command_types.command_type_mask;
+            const payload = parseCommandPayload(self.dialect, self.is_sub_plan, command_type, input) orelse
+                Command.Payload{ .other = .{ .command_type = command_type, .input = input } };
             return .{
                 .raw = raw,
                 .allow_revert = (raw & command_types.flag_allow_revert) != 0,
@@ -614,8 +624,6 @@ pub const Command = struct {
         wrap_eth: RecipientAmount,
         /// `amount` is the minimum WETH to unwrap.
         unwrap_weth: RecipientAmount,
-        /// `amount` is the portion with 1e18 = 100%.
-        pay_portion_full_precision: TokenRecipientAmount,
         /// BALANCE_CHECK_ERC20 (0x0e).
         balance_check_erc20: struct { owner: [20]u8, token: [20]u8, min_balance: u256 },
         permit2_permit: Permit2Permit,
@@ -986,10 +994,6 @@ fn parseCommandPayload(dialect: UrDialect, is_sub_plan: bool, command_type: u8, 
         command_types.sweep => .{ .sweep = parseTokenRecipientAmount(input) orelse return null },
         command_types.transfer => .{ .transfer = parseTokenRecipientAmount(input) orelse return null },
         command_types.pay_portion => .{ .pay_portion = parseTokenRecipientAmount(input) orelse return null },
-        ur_cmd.pay_portion_full_precision => if (dialect == .uniswap)
-            Command.Payload{ .pay_portion_full_precision = parseTokenRecipientAmount(input) orelse return null }
-        else
-            Command.Payload{ .other = .{ .command_type = command_type, .input = input } },
         command_types.v2_swap_exact_in => .{ .v2_swap_exact_in = parseV2SwapExactIn(input) orelse return null },
         command_types.v2_swap_exact_out => .{ .v2_swap_exact_out = parseV2SwapExactOut(input) orelse return null },
         ur_cmd.permit2_permit => .{ .permit2_permit = parsePermit2Permit(input) orelse return null },
@@ -1036,11 +1040,10 @@ fn parseUniversalRouterExecute(data: []const u8, args_base: usize, has_deadline:
     if (commands.len != inputs.count) return null;
     const deadline: ?u256 = if (has_deadline) (readU256At(data, args_base + 64) orelse return null) else null;
 
-    const mask = commandTypeMask(dialect);
     var i: usize = 0;
     while (i < commands.len) : (i += 1) {
         const input_i = bytesAt(inputs.head, 0, i * 32) orelse return null;
-        const command_type = commands[i] & mask;
+        const command_type = commands[i] & command_types.command_type_mask;
         _ = parseCommandPayload(dialect, is_sub_plan, command_type, input_i) orelse return null;
     }
     return .{ .commands = commands, .inputs = inputs, .deadline = deadline, .dialect = dialect, .is_sub_plan = is_sub_plan };
@@ -1241,7 +1244,7 @@ fn parseMulticall(data: []const u8, args_base: usize, kind: MulticallKind, route
 // Decoding: top-level dispatch
 // ============================================================================
 
-/// Shared dispatch for `decode` and `decodeWithUrDialect`. `ur_dialect`
+/// Shared dispatch for `decode` and `decodeBatchFor`. `ur_dialect`
 /// picks the command table for a Universal Router `execute` call.
 fn decodeDispatch(data: []const u8, ur_dialect: UrDialect) ?Decoded {
     if (data.len < 4) return null;
@@ -1277,13 +1280,8 @@ fn decodeDispatch(data: []const u8, ur_dialect: UrDialect) ?Decoded {
     };
 }
 
-/// Like `decode`, but Universal Router `execute` calldata is read with the
-/// given command table. `decode(data)` is `decodeWithUrDialect(data, .uniswap)`.
-pub fn decodeWithUrDialect(data: []const u8, dialect: UrDialect) ?Decoded {
-    return decodeDispatch(data, dialect);
-}
-
-fn isBatchSelector(sel: u32) bool {
+/// Shared with routers.zig, which reuses it for `decodeFor`/`decodeInnerCall`.
+pub fn isBatchSelector(sel: u32) bool {
     return sel == selU32(selectors.multicall) or
         sel == selU32(selectors.multicall_deadline) or
         sel == selU32(selectors.multicall_blockhash) or

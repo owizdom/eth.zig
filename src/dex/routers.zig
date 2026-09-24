@@ -513,14 +513,6 @@ fn parsePancakeStableExactOut(data: []const u8, args_base: usize) ?PancakeStable
 // Decoding: dispatch
 // ============================================================================
 
-fn isBatchSelector(sel: u32) bool {
-    return sel == reader.selU32(calldata.selectors.multicall) or
-        sel == reader.selU32(calldata.selectors.multicall_deadline) or
-        sel == reader.selU32(calldata.selectors.multicall_blockhash) or
-        sel == reader.selU32(calldata.selectors.execute) or
-        sel == reader.selU32(calldata.selectors.execute_deadline);
-}
-
 /// The selector set `calldata.decode` turns into a swap `Decoded` (every
 /// case in `decodeDispatch` except the two batch dispatchers). `.uniswap`,
 /// `.uniswap_ur_v1` and `.pancake_ur` all decode non-batch calls this way.
@@ -665,7 +657,7 @@ fn decodeCamelotV2Inner(data: []const u8, sel: u32) ?Decoded {
 pub fn decodeInnerCall(router: Router, data: []const u8) ?Decoded {
     if (data.len < 4) return null;
     const sel = reader.readSelectorU32(data);
-    if (isBatchSelector(sel)) return null;
+    if (calldata.isBatchSelector(sel)) return null;
     return switch (router) {
         .uniswap, .uniswap_ur_v1, .pancake_ur => calldata.decode(data),
         .pancake_smart_router => decodePancakeSmartInner(data, sel),
@@ -682,6 +674,6 @@ pub fn decodeInnerCall(router: Router, data: []const u8) ?Decoded {
 pub fn decodeFor(router: Router, data: []const u8) ?Decoded {
     if (data.len < 4) return null;
     const sel = reader.readSelectorU32(data);
-    if (isBatchSelector(sel)) return calldata.decodeBatchFor(router, data);
+    if (calldata.isBatchSelector(sel)) return calldata.decodeBatchFor(router, data);
     return decodeInnerCall(router, data);
 }

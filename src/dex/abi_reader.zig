@@ -89,7 +89,6 @@ pub const V3Path = struct {
     }
 };
 
-/// An ABI `uint256[]`, borrowed from calldata.
 /// An Algebra (Camelot V3) packed path `token(20) token(20) [token(20)]...`,
 /// with no fee bytes, borrowed from calldata. `decodeFor` checked that its
 /// length is `20 * n` with `n >= 2`. Exact-output paths are reversed.
@@ -116,6 +115,7 @@ pub const AlgebraPath = struct {
     }
 };
 
+/// An ABI `uint256[]`, borrowed from calldata.
 pub const U256Array = struct {
     /// `len() * 32` bytes.
     words: []const u8,

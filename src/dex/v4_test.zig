@@ -23,10 +23,19 @@
 //! correctly too, by the same coincidence (jumping to offset 0 is a
 //! no-op), which the by-hand walk below confirms independently.
 //!
-//! B2 round-trips both accepted struct layouts (research/uniswap_rest.md
-//! "LIVE layout"): live (deployed routers, no `minHopPriceX36`, single
-//! hookData offset 0x120 / multi path offset 0x80) and current
-//! v4-periphery main (with `minHopPriceX36`, offsets 0x140 / 0xa0).
+//! B2 round-trips the only accepted struct layout (research/uniswap_rest.md
+//! "LIVE layout", spec 0002 section 5 amendment R1): live (deployed
+//! routers), no `minHopPriceX36`, single hookData offset 0x120 exactly,
+//! multi path offset 0x80 exactly. The `min_hop_price_x36` fields were
+//! removed from the V4 structs, because no deployed router reads them; the
+//! current v4-periphery main-branch layout (with `minHopPriceX36`, offsets
+//! 0x140 / 0xa0) is well-formed ABI but is now rejected outright --
+//! `parsePlan` returns null for a plan containing it, rather than decoding
+//! it. See the R1 tests below for why: a reviewer fork repro against the
+//! deployed Universal Router showed a main-layout-shaped SWAP_EXACT_OUT
+//! decoding amount_out as 1e15 while the chain executed 416, because that
+//! router reads amounts from different words than the main layout puts
+//! them at.
 //!
 //! B5 hand-crafts null-producing malformed inputs (the crafted-rejection
 //! list from the test-writer's brief) and fuzzes every B1 fixture: every
@@ -36,7 +45,6 @@
 const std = @import("std");
 const testing = std.testing;
 const v4 = @import("v4.zig");
-const reader = @import("abi_reader.zig");
 const abi_encode = @import("../abi_encode.zig");
 const hex = @import("../hex.zig");
 
@@ -241,7 +249,6 @@ test "B1: live fixture - SWAP_EXACT_IN_SINGLE + SETTLE + TAKE_ALL, no-tuple-offs
     try testing.expectEqual(false, s0.zero_for_one);
     try testing.expectEqual(@as(u128, 50464864394347136374393), s0.amount_in);
     try testing.expectEqual(@as(u128, 13490492716663938), s0.amount_out_minimum);
-    try testing.expectEqual(@as(?u256, null), s0.min_hop_price_x36);
     try testing.expectEqualSlices(u8, &[_]u8{}, s0.hook_data);
 
     const a1 = it.next().?;
@@ -302,7 +309,6 @@ test "B1: live fixture - SWAP_EXACT_IN_SINGLE + SETTLE_ALL + TAKE_ALL, no-tuple-
     try testing.expectEqual(true, s0.zero_for_one);
     try testing.expectEqual(@as(u128, 500000000000000), s0.amount_in);
     try testing.expectEqual(@as(u128, 0), s0.amount_out_minimum);
-    try testing.expectEqual(@as(?u256, null), s0.min_hop_price_x36);
     try testing.expectEqualSlices(u8, &[_]u8{}, s0.hook_data);
 
     const a1 = it.next().?;
@@ -356,7 +362,6 @@ test "B1: live fixture - SETTLE + SWAP_EXACT_IN(multi 1-hop) + TAKE (0x9ae4af73.
         else => return error.WrongVariant,
     };
     try testing.expectEqualSlices(u8, &addr("a0b86991c6218b36c1d19d4a2e9eb0ce3606eb48"), &s1.currency_in);
-    try testing.expectEqual(@as(?reader.U256Array, null), s1.min_hop_price_x36);
     try testing.expectEqual(@as(usize, 1), s1.path.len());
     try expectPathKey(.{
         .intermediate_currency = addr("dac17f958d2ee523a2206206994597c13d831ec7"),
@@ -413,7 +418,6 @@ test "B1: live fixture - SWAP_EXACT_OUT_SINGLE (amount_in_maximum = uint128 max)
     try testing.expectEqual(true, s0.zero_for_one);
     try testing.expectEqual(@as(u128, 2140100000), s0.amount_out);
     try testing.expectEqual(@as(u128, std.math.maxInt(u128)), s0.amount_in_maximum);
-    try testing.expectEqual(@as(?u256, null), s0.min_hop_price_x36);
     try testing.expectEqualSlices(u8, &[_]u8{}, s0.hook_data);
 
     const a1 = it.next().?;
@@ -456,7 +460,6 @@ test "B1: live fixture - SWAP_EXACT_OUT(multi 2-hop) + SETTLE + TAKE (0x0a59d213
         else => return error.WrongVariant,
     };
     try testing.expectEqualSlices(u8, &addr("aea46a60368a7bd060eec7df8cba43b7ef41ad85"), &s0.currency_out);
-    try testing.expectEqual(@as(?reader.U256Array, null), s0.min_hop_price_x36);
     try testing.expectEqual(@as(usize, 2), s0.path.len());
     try expectPathKey(.{
         .intermediate_currency = addr("a0b86991c6218b36c1d19d4a2e9eb0ce3606eb48"),
@@ -520,7 +523,6 @@ test "B1: live fixture - SWAP_EXACT_IN(multi 2-hop, native in) + SETTLE_ALL + TA
         else => return error.WrongVariant,
     };
     try testing.expectEqualSlices(u8, &ZERO_ADDR, &s0.currency_in);
-    try testing.expectEqual(@as(?reader.U256Array, null), s0.min_hop_price_x36);
     try testing.expectEqual(@as(usize, 2), s0.path.len());
     try expectPathKey(.{
         .intermediate_currency = addr("c02aaa39b223fe8d0a0e5c4f27ead9083c756cc2"),
@@ -600,7 +602,6 @@ test "B1: live fixture - SWAP_EXACT_IN_SINGLE + TAKE_ALL + SETTLE_ALL, execute(b
     try testing.expectEqual(true, s0.zero_for_one);
     try testing.expectEqual(@as(u128, 5000000000000000000000), s0.amount_in);
     try testing.expectEqual(@as(u128, 654990808), s0.amount_out_minimum);
-    try testing.expectEqual(@as(?u256, null), s0.min_hop_price_x36);
     try testing.expectEqualSlices(u8, &[_]u8{}, s0.hook_data);
 
     const a1 = it.next().?;
@@ -643,7 +644,6 @@ test "B1: live fixture - SWAP_EXACT_IN(multi 2-hop, hooked path + dynamic-fee fl
         else => return error.WrongVariant,
     };
     try testing.expectEqualSlices(u8, &addr("6b175474e89094c44da98b954eedeac495271d0f"), &s0.currency_in);
-    try testing.expectEqual(@as(?reader.U256Array, null), s0.min_hop_price_x36);
     try testing.expectEqual(@as(usize, 2), s0.path.len());
     try expectPathKey(.{
         .intermediate_currency = addr("a0b86991c6218b36c1d19d4a2e9eb0ce3606eb48"),
@@ -701,8 +701,23 @@ const all_fixtures = [_][]const u8{
 };
 
 // ============================================================================
-// B2: round trips, both accepted layouts, all 4 swap actions, plus
-// settle/settle_all/take/take_all/take_portion, plus an unknown action byte.
+// B2: round trips of the only accepted layout (live) for all 4 swap
+// actions, plus settle/settle_all/take/take_all/take_portion, plus an
+// unknown action byte.
+//
+// R1: the "main layout" (current v4-periphery main branch, with
+// minHopPriceX36) tests below no longer round-trip -- they now assert
+// `parsePlan` returns null for the whole plan. Why: the deployed Universal
+// Router (0x66a9893cc07d91d95644aedd05d03f95e1dba8af) reads swap amounts
+// from different word offsets than the main-layout struct puts them at
+// (it never grew the minHopPriceX36 field). A reviewer fork repro against
+// that router showed a main-layout-shaped SWAP_EXACT_OUT input decoding
+// amount_out as 1e15 while the chain executed 416 -- a well-formed ABI
+// encoding that silently misdecoded live amounts. So a main-layout
+// encoding must now fail closed instead of decoding: this is an accept/
+// reject decision, not a values-differ decision, hence `null`. The
+// `min_hop_price_x36` fields are removed from the V4 structs, since no
+// deployed router reads them (see v4.zig).
 // ============================================================================
 
 /// Build the full V4_SWAP input `abi.encode(bytes actions, bytes[] params)`
@@ -767,12 +782,11 @@ test "B2: round trip - SWAP_EXACT_IN_SINGLE, live layout (no minHopPriceX36)" {
     try testing.expectEqual(true, s.zero_for_one);
     try testing.expectEqual(@as(u128, 1_000_000), s.amount_in);
     try testing.expectEqual(@as(u128, 900_000), s.amount_out_minimum);
-    try testing.expectEqual(@as(?u256, null), s.min_hop_price_x36);
     try testing.expectEqualSlices(u8, &hook_data, s.hook_data);
     try testing.expect(it.next() == null);
 }
 
-test "B2: round trip - SWAP_EXACT_IN_SINGLE, main layout (with minHopPriceX36)" {
+test "R1: SWAP_EXACT_IN_SINGLE, main layout (minHopPriceX36) -> parsePlan null" {
     const allocator = testing.allocator;
     const hook_data = [_]u8{0x42};
     const pool_key_fields = [_]AV{
@@ -785,7 +799,7 @@ test "B2: round trip - SWAP_EXACT_IN_SINGLE, main layout (with minHopPriceX36)" 
         .{ .boolean = false },
         .{ .uint256 = 2_000_000 },
         .{ .uint256 = 1_800_000 },
-        .{ .uint256 = 123456789 }, // minHopPriceX36
+        .{ .uint256 = 123456789 }, // minHopPriceX36: no longer accepted, see the R1 comment above
         .{ .bytes = &hook_data },
     };
     const params = try buildSwapParams(allocator, &struct_fields);
@@ -795,21 +809,7 @@ test "B2: round trip - SWAP_EXACT_IN_SINGLE, main layout (with minHopPriceX36)" 
     const input = try buildPlanInput(allocator, &actions, &params_slices);
     defer allocator.free(input);
 
-    const plan = v4.parsePlan(input);
-    try testing.expect(plan != null);
-    var it = plan.?.iterator();
-    const a = it.next().?;
-    const s = switch (a.payload) {
-        .swap_exact_in_single => |p| p,
-        else => return error.WrongVariant,
-    };
-    try expectPoolKey(.{ .currency0 = TOKEN_A, .currency1 = TOKEN_B, .fee = 500, .tick_spacing = -10, .hooks = HOOKS_ADDR }, s.pool_key);
-    try testing.expectEqual(false, s.zero_for_one);
-    try testing.expectEqual(@as(u128, 2_000_000), s.amount_in);
-    try testing.expectEqual(@as(u128, 1_800_000), s.amount_out_minimum);
-    try testing.expectEqual(@as(?u256, 123456789), s.min_hop_price_x36);
-    try testing.expectEqualSlices(u8, &hook_data, s.hook_data);
-    try testing.expect(it.next() == null);
+    try testing.expectEqual(@as(?v4.Plan, null), v4.parsePlan(input));
 }
 
 test "B2: round trip - SWAP_EXACT_OUT_SINGLE, live layout (no minHopPriceX36)" {
@@ -845,12 +845,11 @@ test "B2: round trip - SWAP_EXACT_OUT_SINGLE, live layout (no minHopPriceX36)" {
     try testing.expectEqual(true, s.zero_for_one);
     try testing.expectEqual(@as(u128, 500_000), s.amount_out);
     try testing.expectEqual(@as(u128, 520_000), s.amount_in_maximum);
-    try testing.expectEqual(@as(?u256, null), s.min_hop_price_x36);
     try testing.expectEqualSlices(u8, &[_]u8{}, s.hook_data);
     try testing.expect(it.next() == null);
 }
 
-test "B2: round trip - SWAP_EXACT_OUT_SINGLE, main layout (with minHopPriceX36)" {
+test "R1: SWAP_EXACT_OUT_SINGLE, main layout (minHopPriceX36) -> parsePlan null" {
     const allocator = testing.allocator;
     const pool_key_fields = [_]AV{
         .{ .address = TOKEN_B },    .{ .address = TOKEN_C },
@@ -862,7 +861,7 @@ test "B2: round trip - SWAP_EXACT_OUT_SINGLE, main layout (with minHopPriceX36)"
         .{ .boolean = false },
         .{ .uint256 = 700_000 },
         .{ .uint256 = 750_000 },
-        .{ .uint256 = 987654321 },
+        .{ .uint256 = 987654321 }, // minHopPriceX36: no longer accepted, see the R1 comment above
         .{ .bytes = &[_]u8{} },
     };
     const params = try buildSwapParams(allocator, &struct_fields);
@@ -872,20 +871,7 @@ test "B2: round trip - SWAP_EXACT_OUT_SINGLE, main layout (with minHopPriceX36)"
     const input = try buildPlanInput(allocator, &actions, &params_slices);
     defer allocator.free(input);
 
-    const plan = v4.parsePlan(input);
-    try testing.expect(plan != null);
-    var it = plan.?.iterator();
-    const a = it.next().?;
-    const s = switch (a.payload) {
-        .swap_exact_out_single => |p| p,
-        else => return error.WrongVariant,
-    };
-    try expectPoolKey(.{ .currency0 = TOKEN_B, .currency1 = TOKEN_C, .fee = 3000, .tick_spacing = -60, .hooks = HOOKS_ADDR }, s.pool_key);
-    try testing.expectEqual(false, s.zero_for_one);
-    try testing.expectEqual(@as(u128, 700_000), s.amount_out);
-    try testing.expectEqual(@as(u128, 750_000), s.amount_in_maximum);
-    try testing.expectEqual(@as(?u256, 987654321), s.min_hop_price_x36);
-    try testing.expect(it.next() == null);
+    try testing.expectEqual(@as(?v4.Plan, null), v4.parsePlan(input));
 }
 
 test "B2: round trip - SWAP_EXACT_IN, live layout (2-hop path, no minHopPriceX36[])" {
@@ -916,7 +902,6 @@ test "B2: round trip - SWAP_EXACT_IN, live layout (2-hop path, no minHopPriceX36
         else => return error.WrongVariant,
     };
     try testing.expectEqualSlices(u8, &TOKEN_A, &s.currency_in);
-    try testing.expectEqual(@as(?reader.U256Array, null), s.min_hop_price_x36);
     try testing.expectEqual(@as(usize, 2), s.path.len());
     try expectPathKey(.{ .intermediate_currency = TOKEN_B, .fee = 500, .tick_spacing = 10, .hooks = ZERO_ADDR, .hook_data = &[_]u8{} }, s.path.get(0));
     try expectPathKey(.{ .intermediate_currency = TOKEN_C, .fee = 3000, .tick_spacing = 60, .hooks = HOOKS_ADDR, .hook_data = &hd1 }, s.path.get(1));
@@ -925,12 +910,12 @@ test "B2: round trip - SWAP_EXACT_IN, live layout (2-hop path, no minHopPriceX36
     try testing.expect(it.next() == null);
 }
 
-test "B2: round trip - SWAP_EXACT_IN, main layout (2-hop path, with minHopPriceX36[])" {
+test "R1: SWAP_EXACT_IN, main layout (2-hop path, minHopPriceX36[]) -> parsePlan null" {
     const allocator = testing.allocator;
     const pk0_fields = [_]AV{ .{ .address = TOKEN_B }, .{ .uint256 = 500 }, .{ .int256 = 10 }, .{ .address = ZERO_ADDR }, .{ .bytes = &[_]u8{} } };
     const pk1_fields = [_]AV{ .{ .address = TOKEN_C }, .{ .uint256 = 3000 }, .{ .int256 = 60 }, .{ .address = ZERO_ADDR }, .{ .bytes = &[_]u8{} } };
     const path_items = [_]AV{ .{ .tuple = &pk0_fields }, .{ .tuple = &pk1_fields } };
-    const min_hop_items = [_]AV{ .{ .uint256 = 111 }, .{ .uint256 = 222 } };
+    const min_hop_items = [_]AV{ .{ .uint256 = 111 }, .{ .uint256 = 222 } }; // minHopPriceX36[]: no longer accepted, see the R1 comment above
     const struct_fields = [_]AV{
         .{ .address = TOKEN_A },
         .{ .array = &path_items },
@@ -945,23 +930,7 @@ test "B2: round trip - SWAP_EXACT_IN, main layout (2-hop path, with minHopPriceX
     const input = try buildPlanInput(allocator, &actions, &params_slices);
     defer allocator.free(input);
 
-    const plan = v4.parsePlan(input);
-    try testing.expect(plan != null);
-    var it = plan.?.iterator();
-    const a = it.next().?;
-    const s = switch (a.payload) {
-        .swap_exact_in => |p| p,
-        else => return error.WrongVariant,
-    };
-    try testing.expectEqual(@as(usize, 2), s.path.len());
-    try testing.expect(s.min_hop_price_x36 != null);
-    const mh = s.min_hop_price_x36.?;
-    try testing.expectEqual(@as(usize, 2), mh.len());
-    try testing.expectEqual(@as(u256, 111), mh.get(0));
-    try testing.expectEqual(@as(u256, 222), mh.get(1));
-    try testing.expectEqual(@as(u128, 6_000_000), s.amount_in);
-    try testing.expectEqual(@as(u128, 5_900_000), s.amount_out_minimum);
-    try testing.expect(it.next() == null);
+    try testing.expectEqual(@as(?v4.Plan, null), v4.parsePlan(input));
 }
 
 test "B2: round trip - SWAP_EXACT_OUT, live layout (2-hop path, no minHopPriceX36[])" {
@@ -991,19 +960,18 @@ test "B2: round trip - SWAP_EXACT_OUT, live layout (2-hop path, no minHopPriceX3
         else => return error.WrongVariant,
     };
     try testing.expectEqualSlices(u8, &TOKEN_C, &s.currency_out);
-    try testing.expectEqual(@as(?reader.U256Array, null), s.min_hop_price_x36);
     try testing.expectEqual(@as(usize, 2), s.path.len());
     try testing.expectEqual(@as(u128, 3_000_000), s.amount_out);
     try testing.expectEqual(@as(u128, 3_100_000), s.amount_in_maximum);
     try testing.expect(it.next() == null);
 }
 
-test "B2: round trip - SWAP_EXACT_OUT, main layout (2-hop path, with minHopPriceX36[])" {
+test "R1: SWAP_EXACT_OUT, main layout (2-hop path, minHopPriceX36[]) -> parsePlan null" {
     const allocator = testing.allocator;
     const pk0_fields = [_]AV{ .{ .address = TOKEN_A }, .{ .uint256 = 500 }, .{ .int256 = 10 }, .{ .address = ZERO_ADDR }, .{ .bytes = &[_]u8{} } };
     const pk1_fields = [_]AV{ .{ .address = TOKEN_B }, .{ .uint256 = 3000 }, .{ .int256 = 60 }, .{ .address = ZERO_ADDR }, .{ .bytes = &[_]u8{} } };
     const path_items = [_]AV{ .{ .tuple = &pk0_fields }, .{ .tuple = &pk1_fields } };
-    const min_hop_items = [_]AV{ .{ .uint256 = 333 }, .{ .uint256 = 444 } };
+    const min_hop_items = [_]AV{ .{ .uint256 = 333 }, .{ .uint256 = 444 } }; // minHopPriceX36[]: no longer accepted, see the R1 comment above
     const struct_fields = [_]AV{
         .{ .address = TOKEN_C },
         .{ .array = &path_items },
@@ -1018,22 +986,70 @@ test "B2: round trip - SWAP_EXACT_OUT, main layout (2-hop path, with minHopPrice
     const input = try buildPlanInput(allocator, &actions, &params_slices);
     defer allocator.free(input);
 
-    const plan = v4.parsePlan(input);
-    try testing.expect(plan != null);
-    var it = plan.?.iterator();
-    const a = it.next().?;
-    const s = switch (a.payload) {
-        .swap_exact_out => |p| p,
-        else => return error.WrongVariant,
-    };
-    try testing.expect(s.min_hop_price_x36 != null);
-    const mh = s.min_hop_price_x36.?;
-    try testing.expectEqual(@as(usize, 2), mh.len());
-    try testing.expectEqual(@as(u256, 333), mh.get(0));
-    try testing.expectEqual(@as(u256, 444), mh.get(1));
-    try testing.expectEqual(@as(u128, 4_000_000), s.amount_out);
-    try testing.expectEqual(@as(u128, 4_100_000), s.amount_in_maximum);
-    try testing.expect(it.next() == null);
+    try testing.expectEqual(@as(?v4.Plan, null), v4.parsePlan(input));
+}
+
+// ============================================================================
+// R1/R6: single-hop hookData-offset-word and multi-hop path-offset-word
+// probes. Each starts from an otherwise-valid live-layout struct (the same
+// shape as the "B2: round trip - SWAP_EXACT_IN_SINGLE, live layout" /
+// "... SWAP_EXACT_IN, live layout" fixtures above) and patches only the one
+// word that carries the offset value -- everything else, including the
+// physical position of the bytes that word points at, is untouched. 0x120
+// (single-hop) and 0x80 (multi-hop) are the only values `parsePlan`
+// accepts; every other value, including the old main-layout's 0x140 /
+// 0xa0, must reject.
+// ============================================================================
+
+test "R1/R6: single-hop hookData offset word in {0x00, 0x60, 0x100, 0x140, 0x160} -> parsePlan null" {
+    const allocator = testing.allocator;
+    const bad_offsets = [_]u256{ 0x00, 0x60, 0x100, 0x140, 0x160 };
+    for (bad_offsets) |bad_offset| {
+        var pb = Builder.init(allocator);
+        defer pb.deinit();
+        try pb.w(0x20); // struct offset: standard "struct = params + word0"
+        try pb.wAddr(TOKEN_A); // currency0
+        try pb.wAddr(TOKEN_B); // currency1
+        try pb.w(3000); // fee
+        try pb.w(60); // tickSpacing
+        try pb.wAddr(ZERO_ADDR); // hooks
+        try pb.w(1); // zeroForOne = true
+        try pb.w(1_000_000); // amountIn
+        try pb.w(900_000); // amountOutMinimum
+        try pb.w(bad_offset); // hookData offset word: patched to the value under test
+        try pb.w(0); // hookData length = 0, physically right where 0x120 would point -- unread once the offset check rejects
+        const param = try pb.ownedSlice();
+        defer allocator.free(param);
+
+        var b = Builder.init(allocator);
+        defer b.deinit();
+        try writeSingleAction(&b, v4.actions.swap_exact_in_single, param);
+        const data = try b.ownedSlice();
+        defer allocator.free(data);
+        try testing.expectEqual(@as(?v4.Plan, null), v4.parsePlan(data));
+    }
+}
+
+test "R1/R6: multi-hop path offset word set to 0xa0 (old main-layout marker) -> parsePlan null" {
+    const allocator = testing.allocator;
+    var pb = Builder.init(allocator);
+    defer pb.deinit();
+    try pb.w(0x20); // struct offset
+    try pb.wAddr(TOKEN_A); // currencyIn
+    try pb.w(0xa0); // path offset word: patched to the old main-layout's marker value
+    try pb.w(1_000_000); // amountIn, at the live-layout's fixed position (unaffected by the offset word's declared value)
+    try pb.w(900_000); // amountOutMinimum, likewise fixed
+    try pb.w(0); // filler word at struct_base+0x80, so a genuinely valid empty path array sits exactly at the declared 0xa0
+    try pb.w(0); // path array: count = 0 -- a real, well-formed PathKeys[] at 0xa0; only the offset *value* must be rejected
+    const param = try pb.ownedSlice();
+    defer allocator.free(param);
+
+    var b = Builder.init(allocator);
+    defer b.deinit();
+    try writeSingleAction(&b, v4.actions.swap_exact_in, param);
+    const data = try b.ownedSlice();
+    defer allocator.free(data);
+    try testing.expectEqual(@as(?v4.Plan, null), v4.parsePlan(data));
 }
 
 test "B2: round trip - SETTLE" {

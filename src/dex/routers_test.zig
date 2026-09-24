@@ -803,6 +803,24 @@ test "fixture: bsc_pancake_ur_0x3593564c_10 command 0x10 is .other via .pancake_
     }
 }
 
+// R6/L6: the same F_PUR_10 bytes, decoded under `.uniswap` instead of
+// `.pancake_ur`. Under `.uniswap`, command 0x10 means V4_SWAP, and
+// `parseUniversalRouterExecute` validates every command eagerly at
+// construction time (not lazily per-command like the iterator's
+// user-mutated-field fallback) -- so this isn't "command 0x10 decodes as
+// `.other`", it's "the whole execute fails to construct". F_PUR_10's command
+// 0x10 carries a PancakeSwap Infinity plan (its own pool key shape, no
+// verified source per spec 0002 non-goals), not a valid V4_SWAP
+// `abi.encode(bytes,bytes[])` plan, so `v4.parsePlan` on it returns null and
+// the top-level decode is null under both `decodeFor(.uniswap, ...)` and
+// plain `c.decode` (which is `.uniswap`, per spec). This is the collision
+// case spec 0002's C1 requires: the same bytes under the wrong router give a
+// different (here, null) result, never a misparse.
+test "R6/L6: F_PUR_10 command 0x10 (Pancake Infinity) via .uniswap -> parsePlan fails, whole execute is null" {
+    try testing.expectEqual(@as(?c.Decoded, null), r.decodeFor(.uniswap, &F_PUR_10));
+    try testing.expectEqual(@as(?c.Decoded, null), c.decode(&F_PUR_10));
+}
+
 // ============================================================================
 // Spec item 2: PancakeRouter classic V2 (BSC), via .uniswap (byte-identical
 // to UniswapV2Router02).

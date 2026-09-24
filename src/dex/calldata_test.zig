@@ -11,6 +11,7 @@
 const std = @import("std");
 const testing = std.testing;
 const c = @import("calldata.zig");
+const routers = @import("routers.zig");
 const abi_encode = @import("../abi_encode.zig");
 const hex = @import("../hex.zig");
 const uint256 = @import("../uint256.zig");
@@ -160,14 +161,11 @@ fn walkV4Plan(p: c.v4.Plan) void {
     while (it.next()) |action| {
         switch (action.payload) {
             .swap_exact_in_single, .swap_exact_out_single => {},
-            .swap_exact_in => |s| {
-                walkPathKeys(s.path);
-                if (s.min_hop_price_x36) |arr| walkU256Array(arr);
-            },
-            .swap_exact_out => |s| {
-                walkPathKeys(s.path);
-                if (s.min_hop_price_x36) |arr| walkU256Array(arr);
-            },
+            // R1: `min_hop_price_x36` is removed from the V4 structs -- no
+            // deployed router reads it, and only the live layout (which
+            // never had it) is accepted.
+            .swap_exact_in => |s| walkPathKeys(s.path),
+            .swap_exact_out => |s| walkPathKeys(s.path),
             .settle, .settle_all, .take, .take_all, .take_portion, .other => {},
         }
     }
@@ -192,7 +190,10 @@ fn walkCommand(cmd: c.Command) void {
             if (p.min_hop_price_x36) |arr| walkU256Array(arr);
         },
         .sweep, .transfer, .pay_portion, .wrap_eth, .unwrap_weth, .other => {},
-        .pay_portion_full_precision, .balance_check_erc20 => {},
+        // R2: PAY_PORTION_FULL_PRECISION (0x07) is removed -- the deployed
+        // Universal Router reverts InvalidCommandType(7), so 0x07 is `.other`
+        // in every dialect and there is no `pay_portion_full_precision` arm.
+        .balance_check_erc20 => {},
         .permit2_permit, .permit2_transfer_from => {},
         .permit2_permit_batch => |p| walkPermitDetailsArray(p.details),
         .permit2_transfer_from_batch => |a| walkAllowanceTransferArray(a),
@@ -240,7 +241,7 @@ fn walkDecoded(d: c.Decoded) void {
             while (it.next()) |cmd| walkCommand(cmd);
         },
         // Phase 2 `Decoded` tags: only ever produced by `decodeFor` (routers.zig),
-        // never by `decode`/`decodeWithUrDialect`. Walked by the Phase 2 (routers)
+        // never by `decode`/`decodeFor`. Walked by the Phase 2 (routers)
         // test-writer track, which owns routers_test.zig.
         .aerodrome_swap_exact_tokens_for_tokens,
         .aerodrome_swap_exact_eth_for_tokens,
@@ -2218,7 +2219,6 @@ test "AT5/B1/B3: UR fixture - single command 0x10 (typed v4_swap, live layout)" 
     try testing.expectEqual(false, swap_in.zero_for_one);
     try testing.expectEqual(@as(u128, 47066602), swap_in.amount_in);
     try testing.expectEqual(@as(u128, 51404065101), swap_in.amount_out_minimum);
-    try testing.expectEqual(@as(?u256, null), swap_in.min_hop_price_x36); // live layout
     try testing.expectEqualSlices(
         u8,
         &(hex.hexToBytesFixed(97, "0x6c1ba8962ca527ed8f895ba1574483ff8323f54398da1bcdaa5e5f5cafd60e264ad13a2ab9bac30cdfe45f99bce199fb92abf255863fdecc45608b929eaa122c1bffffffffffffffffffffffffffffffffffffffffffffffffffffff172b5af000") catch unreachable),
@@ -2720,7 +2720,6 @@ test "B3: UR fixture - commands 0x02,0x0c,0x10,0x0b (typed permit2_transfer_from
     try testing.expectEqual(true, swap_out.zero_for_one);
     try testing.expectEqual(@as(u128, 1993877407862377097924), swap_out.amount_out);
     try testing.expectEqual(@as(u128, 29012181416544728), swap_out.amount_in_maximum);
-    try testing.expectEqual(@as(?u256, null), swap_out.min_hop_price_x36);
     try testing.expectEqual(@as(usize, 0), swap_out.hook_data.len);
 
     const a1 = ait.next().?;
@@ -2839,7 +2838,6 @@ test "B1/B3: UR fixture - execute(bytes,bytes[]) no deadline, single command 0x1
     try testing.expectEqual(true, swap_in.zero_for_one);
     try testing.expectEqual(@as(u128, 5000000000000000000000), swap_in.amount_in);
     try testing.expectEqual(@as(u128, 672025784), swap_in.amount_out_minimum);
-    try testing.expectEqual(@as(?u256, null), swap_in.min_hop_price_x36);
 
     const a1 = ait.next().?;
     const take_all = switch (a1.payload) {
@@ -2881,7 +2879,7 @@ test "Wave A #4: fixture - v2router02 swapETHForExactTokens (0xfb3bdb41)" {
 // ============================================================================
 
 fn expectUrV1(data: []const u8, expected_commands: []const u8, expected_tags: []const std.meta.Tag(c.Command.Payload)) !void {
-    const decoded = c.decodeWithUrDialect(data, .uniswap_v1);
+    const decoded = c.decodeFor(.uniswap_ur_v1, data);
     try testing.expect(decoded != null);
     const ur = switch (decoded.?) {
         .universal_router_execute => |u| u,
@@ -2898,7 +2896,7 @@ fn expectUrV1(data: []const u8, expected_commands: []const u8, expected_tags: []
 }
 
 test "B3: uniswap_v1 dialect fixture - commands 0x0a,0x00 (typed permit2_permit incl. signature, v3_swap_exact_in)" {
-    const decoded = c.decodeWithUrDialect(&F_UR_V1_0A00, .uniswap_v1);
+    const decoded = c.decodeFor(.uniswap_ur_v1, &F_UR_V1_0A00);
     try testing.expect(decoded != null);
     const ur = switch (decoded.?) {
         .universal_router_execute => |u| u,
@@ -2946,7 +2944,7 @@ test "B3: uniswap_v1 dialect fixture - commands 0x0a,0x00 (typed permit2_permit 
 }
 
 test "B3: uniswap_v1 dialect fixture - commands 0x08,0x0c,0x06,0x04 (v2_swap_exact_in, unwrap_weth, pay_portion, sweep)" {
-    const decoded = c.decodeWithUrDialect(&F_UR_V1_080C0604, .uniswap_v1);
+    const decoded = c.decodeFor(.uniswap_ur_v1, &F_UR_V1_080C0604);
     try testing.expect(decoded != null);
     const ur = switch (decoded.?) {
         .universal_router_execute => |u| u,
@@ -3078,7 +3076,7 @@ test "B3: uniswap_v1 dialect - crafted execute with a 0x21 sub-plan (swap + nest
     const encoded = try abi_encode.encodeFunctionCall(allocator, c.selectors.execute_deadline, &values);
     defer allocator.free(encoded);
 
-    const decoded = c.decodeWithUrDialect(encoded, .uniswap_v1);
+    const decoded = c.decodeFor(.uniswap_ur_v1, encoded);
     try testing.expect(decoded != null);
     const ur = switch (decoded.?) {
         .universal_router_execute => |u| u,
@@ -3125,7 +3123,114 @@ test "B3: uniswap_v1 dialect - crafted execute with a 0x21 sub-plan (swap + nest
     try testing.expectEqual(@as(?c.Command, null), it.next());
 }
 
-test "B3: uniswap_v1 dialect - command byte with bit 0x40 set uses mask 0x3f, not 0x7f" {
+// ============================================================================
+// R3: iterators never hit `unreachable` on user-mutated public fields. A
+// re-parse failure under the mutated field yields `.other` (UR command) or
+// `.other` (multicall inner call) with the raw input/data, never a panic.
+// `dialect`/`router` are public precisely so a caller can override them
+// (e.g. after `routerAt` disagrees with the call site); this is the
+// contract that makes doing so safe.
+// ============================================================================
+
+test "R3: UniversalRouterExecute.dialect mutated after decode -> iterate without panic, NFT 0x10 stays .other" {
+    const allocator = testing.allocator;
+
+    // A crafted uniswap_v1 execute with one NFT command (0x10): valid under
+    // `.uniswap_ur_v1` (0x10-0x20 are NFT/approval commands, always
+    // `.other`), where the raw bytes are NOT a valid V4_SWAP
+    // `abi.encode(bytes,bytes[])` plan.
+    const nft_payload = [_]u8{ 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08 };
+    const commands = [_]u8{0x10};
+    const inputs = [_]AV{.{ .bytes = &nft_payload }};
+    const values = [_]AV{
+        .{ .bytes = &commands },
+        .{ .array = &inputs },
+        .{ .uint256 = 1790300000 },
+    };
+    const encoded = try abi_encode.encodeFunctionCall(allocator, c.selectors.execute_deadline, &values);
+    defer allocator.free(encoded);
+
+    const decoded = c.decodeFor(.uniswap_ur_v1, encoded);
+    try testing.expect(decoded != null);
+    const ur = switch (decoded.?) {
+        .universal_router_execute => |u| u,
+        else => return error.WrongVariant,
+    };
+    try testing.expect(ur.dialect == .uniswap_v1);
+
+    // A caller constructs the iterator, then mutates its public `dialect`
+    // field to `.uniswap` (changed since construction), under which 0x10
+    // means V4_SWAP: `nft_payload` is not a valid plan for it, so the
+    // command must re-decode to `.other` with the raw input, not panic.
+    var it = ur.iterator();
+    it.dialect = .uniswap;
+    const cmd0 = it.next().?;
+    try testing.expectEqual(@as(u8, 0x10), cmd0.raw);
+    const other = switch (cmd0.payload) {
+        .other => |o| o,
+        else => return error.WrongVariant,
+    };
+    try testing.expectEqual(@as(u8, 0x10), other.command_type);
+    try testing.expectEqualSlices(u8, &nft_payload, other.input);
+    try testing.expect(it.next() == null);
+}
+
+test "R3: Multicall.router mutated after decode -> iterate without panic, slipstream swap stays .swap or falls back to .other" {
+    const allocator = testing.allocator;
+
+    // exactInputSingle((address,address,int24,address,uint256,uint256,uint256,uint160)):
+    // an all-static tuple, so encoding its 8 fields flat produces the same
+    // bytes as encoding one tuple argument. Recognized as a swap selector
+    // only under `.slipstream` (routers.isInnerSwapSelector) -- not under
+    // `.camelot_v2`, a V2-style router with an unrelated selector set.
+    const inner_values = [_]AV{
+        .{ .address = RT_TOKEN_IN },
+        .{ .address = RT_TOKEN_OUT },
+        .{ .int256 = 60 }, // tickSpacing
+        .{ .address = RT_RECIPIENT },
+        .{ .uint256 = 1790300000 }, // deadline
+        .{ .uint256 = 1000 }, // amountIn
+        .{ .uint256 = 900 }, // amountOutMinimum
+        .{ .uint256 = 0 }, // sqrtPriceLimitX96
+    };
+    const inner_call = try abi_encode.encodeFunctionCall(allocator, routers.selectors.slipstream_exact_input_single, &inner_values);
+    defer allocator.free(inner_call);
+
+    const calls = [_]AV{.{ .bytes = inner_call }};
+    const outer_values = [_]AV{.{ .array = &calls }};
+    const encoded = try abi_encode.encodeFunctionCall(allocator, c.selectors.multicall, &outer_values);
+    defer allocator.free(encoded);
+
+    const decoded = c.decodeFor(.slipstream, encoded);
+    try testing.expect(decoded != null);
+    const mc = switch (decoded.?) {
+        .multicall => |m| m,
+        else => return error.WrongVariant,
+    };
+    try testing.expect(mc.router == .slipstream);
+    {
+        var it0 = mc.iterator();
+        const call0 = it0.next().?;
+        try testing.expect(std.meta.activeTag(call0) == .swap);
+    }
+
+    // A caller constructs the iterator, then mutates its public `router`
+    // field to `.camelot_v2` (changed since construction), under which this
+    // selector is not a recognized swap (or payment) selector: the inner
+    // call must re-decode to `.other` with the raw selector/data, not panic.
+    var it = mc.iterator();
+    it.router = .camelot_v2;
+    const call0 = it.next().?;
+    const other = switch (call0) {
+        .other => |o| o,
+        .swap, .payment => return error.WrongVariant,
+    };
+    try testing.expectEqualSlices(u8, &routers.selectors.slipstream_exact_input_single, &other.selector);
+    try testing.expectEqualSlices(u8, inner_call, other.data);
+    try testing.expect(it.next() == null);
+}
+
+test "R2: command byte with bit 0x40 set uses mask 0x3f in every dialect, including .uniswap" {
     const allocator = testing.allocator;
     // Same PERMIT2_PERMIT input as the round trip below; only the command
     // byte differs.
@@ -3141,9 +3246,12 @@ test "B3: uniswap_v1 dialect - command byte with bit 0x40 set uses mask 0x3f, no
     const in_permit = try abi_encode.encodeValues(allocator, &cmd_permit);
     defer allocator.free(in_permit);
 
-    // 0x4a = 0b0100_1010. Under `.uniswap`'s 0x7f mask this command type is
-    // 0x4a (unknown, `.other`). Under `.uniswap_v1`'s 0x3f mask, bit 0x40 is
-    // dropped and the command type is 0x0a (PERMIT2_PERMIT, typed).
+    // R2 (spec 0002 section 5): every dialect's deployed Universal Router
+    // masks the command byte to 0x3f (0x66a9893c...'s bytecode:
+    // `603f8760f81c16`). 0x4a = 0b0100_1010; masked by 0x3f that is 0x0a
+    // (PERMIT2_PERMIT, typed) under BOTH `.uniswap` and `.uniswap_ur_v1` --
+    // there is no longer a wider 0x7f mask anywhere that would leave 0x4a
+    // unknown/`.other`.
     const raw_byte: u8 = 0x0a | 0x40;
     const commands = [_]u8{raw_byte};
     const inputs = [_]AV{.{ .bytes = in_permit }};
@@ -3155,20 +3263,72 @@ test "B3: uniswap_v1 dialect - command byte with bit 0x40 set uses mask 0x3f, no
     const encoded = try abi_encode.encodeFunctionCall(allocator, c.selectors.execute_deadline, &values);
     defer allocator.free(encoded);
 
-    const decoded_v1 = c.decodeWithUrDialect(encoded, .uniswap_v1);
-    try testing.expect(decoded_v1 != null);
-    const ur_v1 = switch (decoded_v1.?) {
+    inline for (.{ c.Router.uniswap, c.Router.uniswap_ur_v1 }) |router| {
+        const decoded = c.decodeFor(router, encoded);
+        try testing.expect(decoded != null);
+        const ur = switch (decoded.?) {
+            .universal_router_execute => |u| u,
+            else => return error.WrongVariant,
+        };
+        var it = ur.iterator();
+        const cmd = it.next().?;
+        try testing.expectEqual(raw_byte, cmd.raw);
+        const permit = switch (cmd.payload) {
+            .permit2_permit => |p| p,
+            else => return error.WrongVariant,
+        };
+        try testing.expectEqualSlices(u8, &addr("a0b86991c6218b36c1d19d4a2e9eb0ce3606eb48"), &permit.details.token);
+    }
+}
+
+test "R2: command byte 0x48 (V2_SWAP_EXACT_IN with bit 0x40 set) under .uniswap decodes as v2_swap_exact_in" {
+    const allocator = testing.allocator;
+    // bytecode 603f8760f81c16: the deployed Universal Router
+    // (0x66a9893cc07d91d95644aedd05d03f95e1dba8af) masks every command byte
+    // to 0x3f before dispatch; `eth_call`ing `execute` with raw command byte
+    // 0x4b (WRAP_ETH | 0x40) against it succeeds as WRAP_ETH, confirming the
+    // mask is 0x3f, not 0x7f, for `.uniswap` too. 0x48 = V2_SWAP_EXACT_IN
+    // (0x08) with the same stray bit 0x40 set.
+    var path_buf: [2]AV = undefined;
+    const cmd_v2_in = [_]AV{
+        .{ .address = RT_RECIPIENT },
+        .{ .uint256 = 200 },
+        .{ .uint256 = 190 },
+        .{ .array = rtPathValues(&RT_PATH_A, &path_buf) },
+        .{ .boolean = true },
+    };
+    const in_v2_in = try abi_encode.encodeValues(allocator, &cmd_v2_in);
+    defer allocator.free(in_v2_in);
+
+    const raw_byte: u8 = c.command_types.v2_swap_exact_in | 0x40;
+    const commands = [_]u8{raw_byte};
+    const inputs = [_]AV{.{ .bytes = in_v2_in }};
+    const values = [_]AV{
+        .{ .bytes = &commands },
+        .{ .array = &inputs },
+        .{ .uint256 = 1790300000 },
+    };
+    const encoded = try abi_encode.encodeFunctionCall(allocator, c.selectors.execute_deadline, &values);
+    defer allocator.free(encoded);
+
+    const decoded = c.decodeFor(.uniswap, encoded);
+    try testing.expect(decoded != null);
+    const ur = switch (decoded.?) {
         .universal_router_execute => |u| u,
         else => return error.WrongVariant,
     };
-    var it_v1 = ur_v1.iterator();
-    const cmd_v1 = it_v1.next().?;
-    try testing.expectEqual(raw_byte, cmd_v1.raw);
-    const permit_v1 = switch (cmd_v1.payload) {
-        .permit2_permit => |p| p,
+    var it = ur.iterator();
+    const cmd = it.next().?;
+    try testing.expectEqual(raw_byte, cmd.raw);
+    const swap = switch (cmd.payload) {
+        .v2_swap_exact_in => |p| p,
         else => return error.WrongVariant,
     };
-    try testing.expectEqualSlices(u8, &addr("a0b86991c6218b36c1d19d4a2e9eb0ce3606eb48"), &permit_v1.details.token);
+    try testing.expectEqualSlices(u8, &RT_RECIPIENT, &swap.recipient);
+    try testing.expectEqual(@as(u256, 200), swap.amount_in);
+    try testing.expectEqual(@as(u256, 190), swap.amount_out_min);
+    try testing.expectEqual(@as(usize, 2), swap.path.len());
+    try testing.expect(it.next() == null);
 }
 
 // ============================================================================
@@ -3269,7 +3429,7 @@ test "B3: round trip - PERMIT2_PERMIT_BATCH (0x03), 2 details" {
     try testing.expectEqual(@as(u48, 2), d1.nonce);
 }
 
-test "B3: round trip - PAY_PORTION_FULL_PRECISION (0x07)" {
+test "R2: command 0x07 is .other under .uniswap (PAY_PORTION_FULL_PRECISION removed; deployed router reverts InvalidCommandType(7))" {
     const allocator = testing.allocator;
     const cmd = [_]AV{
         .{ .address = RT_TOKEN_IN },
@@ -3293,13 +3453,14 @@ test "B3: round trip - PAY_PORTION_FULL_PRECISION (0x07)" {
     };
     var it = ur.iterator();
     const cmd0 = it.next().?;
-    const pp = switch (cmd0.payload) {
-        .pay_portion_full_precision => |p| p,
+    try testing.expectEqual(@as(u8, 0x07), cmd0.raw);
+    const other = switch (cmd0.payload) {
+        .other => |o| o,
         else => return error.WrongVariant,
     };
-    try testing.expectEqualSlices(u8, &RT_TOKEN_IN, &pp.token);
-    try testing.expectEqualSlices(u8, &RT_RECIPIENT, &pp.recipient);
-    try testing.expectEqual(@as(u256, 500000000000000000), pp.amount);
+    try testing.expectEqual(@as(u8, 0x07), other.command_type);
+    try testing.expectEqualSlices(u8, in_bytes, other.input);
+    try testing.expect(it.next() == null);
 }
 
 test "B3: round trip - PERMIT2_PERMIT (0x0a)" {
@@ -3530,7 +3691,7 @@ test "B3: round trip - PancakeSwap stable swap 0x22/0x23 under .pancake dialect"
     defer allocator.free(encoded);
 
     // Under .pancake, 0x22/0x23 are typed stable swaps.
-    const decoded_pancake = c.decodeWithUrDialect(encoded, .pancake);
+    const decoded_pancake = c.decodeFor(.pancake_ur, encoded);
     try testing.expect(decoded_pancake != null);
     const ur_pancake = switch (decoded_pancake.?) {
         .universal_router_execute => |u| u,
@@ -3597,7 +3758,7 @@ test "B1/B3: round trip - V4_SWAP (0x10) dialect matrix: typed under .uniswap, .
     const encoded = try abi_encode.encodeFunctionCall(allocator, c.selectors.execute_deadline, &values);
     defer allocator.free(encoded);
 
-    const decoded_uniswap = c.decodeWithUrDialect(encoded, .uniswap);
+    const decoded_uniswap = c.decodeFor(.uniswap, encoded);
     try testing.expect(decoded_uniswap != null);
     const ur_uniswap = switch (decoded_uniswap.?) {
         .universal_router_execute => |u| u,
@@ -3611,14 +3772,22 @@ test "B1/B3: round trip - V4_SWAP (0x10) dialect matrix: typed under .uniswap, .
     };
     try testing.expectEqualSlices(u8, &v4_actions, plan.actions);
 
-    inline for (.{ c.UrDialect.uniswap_v1, c.UrDialect.pancake }) |dialect| {
-        const decoded = c.decodeWithUrDialect(encoded, dialect);
+    // Dialects are reached through `decodeFor`'s `Router`. Each router pairs
+    // with the dialect its `UniversalRouterExecute.dialect` should come back as.
+    const router_dialect_cases = .{
+        .{ c.Router.uniswap_ur_v1, c.UrDialect.uniswap_v1 },
+        .{ c.Router.pancake_ur, c.UrDialect.pancake },
+    };
+    inline for (router_dialect_cases) |case| {
+        const router = case[0];
+        const expected_dialect = case[1];
+        const decoded = c.decodeFor(router, encoded);
         try testing.expect(decoded != null);
         const ur = switch (decoded.?) {
             .universal_router_execute => |u| u,
             else => return error.WrongVariant,
         };
-        try testing.expect(ur.dialect == dialect);
+        try testing.expect(ur.dialect == expected_dialect);
         var it = ur.iterator();
         const cmd0 = it.next().?;
         const other0 = switch (cmd0.payload) {
