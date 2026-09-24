@@ -63,7 +63,9 @@ Mainnet router addresses:
 - UniswapV2Router02: `0x7a250d5630B4cF539739dF2C5dAcb4c659F2488D`
 - V3 SwapRouter: `0xE592427A0AEce92De3Edee1F18E0157C05861564`
 - SwapRouter02: `0x68b3465833fb72A70ecDF485E0e4C7bD8665Fc45`
-- Universal Router: `0x66a9893cC07D91D95644AEDD05D03f95e1dBA8Af` or `0x3fC91A3afd70395Cd496C647d5a6CC9D4B2b7FAD`
+- Universal Router: `0x66a9893cC07D91D95644AEDD05D03f95e1dBA8Af`
+
+The pre-V4 Universal Router `0x3fC91A3afd70395Cd496C647d5a6CC9D4B2b7FAD` uses a different command table; decode its calldata with `decodeFor(.uniswap_ur_v1, data)` (see Other Routers).
 
 Forks that reuse these ABIs (SushiSwap V2, PancakeSwap V2) decode the same way.
 
@@ -165,7 +167,7 @@ switch (decoded) {
 | Router | Chains | Decoded as |
 |--------|--------|------------|
 | Uniswap V2Router02, SwapRouter, SwapRouter02, Universal Router | Ethereum | `.uniswap` (same as `decode`) |
-| Uniswap Universal Router v1 (pre-V4) | Ethereum | `.uniswap_ur_v1` |
+| Uniswap Universal Router v1 (pre-V4), `0x3fC91A3a…7FAD` | Ethereum | `.uniswap_ur_v1` |
 | SushiSwap V2 and V3, PancakeSwap V2 and V3 | several | `.uniswap` (same ABI) |
 | PancakeSwap SmartRouter | BSC, Ethereum | `.pancake_smart_router` (adds stable swaps) |
 | PancakeSwap Universal Router | BSC | `.pancake_ur` (adds stable-swap commands) |

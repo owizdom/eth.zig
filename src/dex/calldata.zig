@@ -1197,8 +1197,8 @@ fn decodeMulticallPayment(sel: u32, inner: []const u8) ?Multicall.Payment {
 /// / `decodeInnerCall`), a typed payment/permit helper, or `.other`. Null
 /// means the call looked like a swap or payment but failed to parse.
 fn decodeMulticallInner(router: routers.Router, inner: []const u8) ?Multicall.Call {
+    const sel = readSelectorU32(inner) orelse return null;
     const sel4 = inner[0..4].*;
-    const sel = readSelectorU32(inner);
     if (routers.isInnerSwapSelector(router, sel4)) {
         const decoded = routers.decodeInnerCall(router, inner) orelse return null;
         return .{ .swap = decoded };
@@ -1247,8 +1247,7 @@ fn parseMulticall(data: []const u8, args_base: usize, kind: MulticallKind, route
 /// Shared dispatch for `decode` and `decodeBatchFor`. `ur_dialect`
 /// picks the command table for a Universal Router `execute` call.
 fn decodeDispatch(data: []const u8, ur_dialect: UrDialect) ?Decoded {
-    if (data.len < 4) return null;
-    const sel = readSelectorU32(data);
+    const sel = readSelectorU32(data) orelse return null;
     const args_base: usize = 4;
 
     return switch (sel) {
@@ -1294,8 +1293,7 @@ pub fn isBatchSelector(sel: u32) bool {
 /// its rules, and `execute` uses the router's `UrDialect`. Null for any other
 /// selector. Used by `decodeFor`.
 pub fn decodeBatchFor(router: Router, data: []const u8) ?Decoded {
-    if (data.len < 4) return null;
-    const sel = readSelectorU32(data);
+    const sel = readSelectorU32(data) orelse return null;
     if (!isBatchSelector(sel)) return null;
     const args_base: usize = 4;
 

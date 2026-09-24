@@ -655,8 +655,7 @@ fn decodeCamelotV2Inner(data: []const u8, sel: u32) ?Decoded {
 /// level deep. Never panics: `data.len < 4` and any malformed input just
 /// return null.
 pub fn decodeInnerCall(router: Router, data: []const u8) ?Decoded {
-    if (data.len < 4) return null;
-    const sel = reader.readSelectorU32(data);
+    const sel = reader.readSelectorU32(data) orelse return null;
     if (calldata.isBatchSelector(sel)) return null;
     return switch (router) {
         .uniswap, .uniswap_ur_v1, .pancake_ur => calldata.decode(data),
@@ -672,8 +671,7 @@ pub fn decodeInnerCall(router: Router, data: []const u8) ?Decoded {
 /// malformed input; never panics and never allocates. For `.uniswap` this is
 /// always equal to `calldata.decode(data)`.
 pub fn decodeFor(router: Router, data: []const u8) ?Decoded {
-    if (data.len < 4) return null;
-    const sel = reader.readSelectorU32(data);
+    const sel = reader.readSelectorU32(data) orelse return null;
     if (calldata.isBatchSelector(sel)) return calldata.decodeBatchFor(router, data);
     return decodeInnerCall(router, data);
 }

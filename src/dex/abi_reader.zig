@@ -255,7 +255,9 @@ pub fn readU160At(data: []const u8, pos: usize) ?u160 {
     return std.mem.readInt(u160, w[12..32], .big);
 }
 
-pub fn readSelectorU32(data: []const u8) u32 {
+/// The 4-byte selector as a big-endian u32, or null if `data` is shorter.
+pub fn readSelectorU32(data: []const u8) ?u32 {
+    if (data.len < 4) return null;
     return std.mem.readInt(u32, data[0..4], .big);
 }
 

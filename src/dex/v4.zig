@@ -91,6 +91,7 @@ pub const PathKeys = struct {
 pub const ExactInputSingle = struct {
     pool_key: PoolKey,
     zero_for_one: bool,
+    /// 0 is OPEN_DELTA: the router swaps its full credit of the input currency.
     amount_in: u128,
     amount_out_minimum: u128,
     hook_data: []const u8,
@@ -99,6 +100,7 @@ pub const ExactInputSingle = struct {
 pub const ExactOutputSingle = struct {
     pool_key: PoolKey,
     zero_for_one: bool,
+    /// 0 is OPEN_DELTA: the router takes its full debt of the output currency.
     amount_out: u128,
     amount_in_maximum: u128,
     hook_data: []const u8,
@@ -107,6 +109,7 @@ pub const ExactOutputSingle = struct {
 pub const ExactInput = struct {
     currency_in: [20]u8,
     path: PathKeys,
+    /// 0 is OPEN_DELTA: the router swaps its full credit of `currency_in`.
     amount_in: u128,
     amount_out_minimum: u128,
 };
@@ -115,6 +118,7 @@ pub const ExactInput = struct {
 pub const ExactOutput = struct {
     currency_out: [20]u8,
     path: PathKeys,
+    /// 0 is OPEN_DELTA: the router takes its full debt of `currency_out`.
     amount_out: u128,
     amount_in_maximum: u128,
 };
@@ -126,6 +130,8 @@ pub const CurrencyAmount = struct {
 
 pub const CurrencyRecipientAmount = struct {
     currency: [20]u8,
+    /// Raw value: `0x0…01` is msg.sender and `0x0…02` is the router
+    /// (ActionConstants MSG_SENDER / ADDRESS_THIS); not resolved here.
     recipient: [20]u8,
     amount: u256,
 };
@@ -142,11 +148,14 @@ pub const Action = struct {
         swap_exact_out: ExactOutput,
         settle: struct {
             currency: [20]u8,
+            /// 0 is OPEN_DELTA (settle the full debt); 1 << 255 is
+            /// CONTRACT_BALANCE (pay the router's whole balance).
             amount: u256,
             payer_is_user: bool,
         },
         /// `amount` is the maximum to settle.
         settle_all: CurrencyAmount,
+        /// `amount` 0 is OPEN_DELTA: take the full credit.
         take: CurrencyRecipientAmount,
         /// `amount` is the minimum to take.
         take_all: CurrencyAmount,
