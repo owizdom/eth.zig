@@ -156,6 +156,7 @@ fn walkCommand(cmd: c.Command) void {
             if (p.min_hop_price_x36) |arr| walkU256Array(arr);
         },
         .sweep, .transfer, .pay_portion, .wrap_eth, .unwrap_weth, .other => {},
+        else => {}, // wave 2 seam placeholder; the test-writer replaces this
     }
 }
 
@@ -182,7 +183,7 @@ fn walkDecoded(d: c.Decoded) void {
             while (it.next()) |call| {
                 switch (call) {
                     .swap => |inner| walkDecoded(inner),
-                    .other => {},
+                    .payment, .other => {},
                 }
             }
         },
@@ -190,6 +191,7 @@ fn walkDecoded(d: c.Decoded) void {
             var it = ur.iterator();
             while (it.next()) |cmd| walkCommand(cmd);
         },
+        else => {}, // wave 2 seam placeholder; the test-writer replaces this
     }
 }
 
@@ -1320,7 +1322,7 @@ test "AT11: fixture - multicall(bytes[]) with .other + swap inner calls (0xac965
     const call0 = it.next().?;
     const other0 = switch (call0) {
         .other => |o| o,
-        .swap => return error.WrongVariant,
+        .swap, .payment => return error.WrongVariant,
     };
     try testing.expectEqualSlices(u8, &sel("f3995c67"), &other0.selector);
     try testing.expectEqual(@as(usize, 196), other0.data.len); // 4 + 6*32
@@ -1329,7 +1331,7 @@ test "AT11: fixture - multicall(bytes[]) with .other + swap inner calls (0xac965
     const call1 = it.next().?;
     const swap1 = switch (call1) {
         .swap => |s| s,
-        .other => return error.WrongVariant,
+        .payment, .other => return error.WrongVariant,
     };
     const inner = switch (swap1) {
         .v3_exact_input_single => |s| s,
@@ -1361,7 +1363,7 @@ test "AT11: fixture - multicall(uint256,bytes[]) with deadline (0x5ae401dc)" {
     const call0 = it.next().?;
     const swap0 = switch (call0) {
         .swap => |s| s,
-        .other => return error.WrongVariant,
+        .payment, .other => return error.WrongVariant,
     };
     const inner = switch (swap0) {
         .v3_exact_input => |s| s,
@@ -1429,7 +1431,7 @@ test "AT11: multicall(bytes[]) round trip - non-swap inner call is .other with i
     const call0 = it.next().?;
     const other0 = switch (call0) {
         .other => |o| o,
-        .swap => return error.WrongVariant,
+        .swap, .payment => return error.WrongVariant,
     };
     try testing.expectEqualSlices(u8, &[_]u8{ 0x49, 0x40, 0x4b, 0x7c }, &other0.selector);
     try testing.expectEqualSlices(u8, inner_call, other0.data);
@@ -1458,7 +1460,7 @@ test "AT11: multicall - a nested multicall inner call is .other, never recursed"
     const call0 = it.next().?;
     const other0 = switch (call0) {
         .other => |o| o,
-        .swap => return error.WrongVariant,
+        .swap, .payment => return error.WrongVariant,
     };
     try testing.expectEqualSlices(u8, &c.selectors.multicall, &other0.selector);
 }

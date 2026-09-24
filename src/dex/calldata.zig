@@ -50,6 +50,36 @@
 const std = @import("std");
 const keccak = @import("../keccak.zig");
 const uint256 = @import("../uint256.zig");
+const reader = @import("abi_reader.zig");
+const routers = @import("routers.zig");
+/// Uniswap V4 swap plans (Universal Router `V4_SWAP`).
+pub const v4 = @import("v4.zig");
+pub const AddressPath = reader.AddressPath;
+pub const AlgebraPath = reader.AlgebraPath;
+pub const V3Path = reader.V3Path;
+pub const U256Array = reader.U256Array;
+pub const BytesArray = reader.BytesArray;
+const addChecked = reader.addChecked;
+const mulChecked = reader.mulChecked;
+const roundUpWord = reader.roundUpWord;
+const wordToUsize = reader.wordToUsize;
+const isZeroSlice = reader.isZeroSlice;
+const readWord = reader.readWord;
+const readU256At = reader.readU256At;
+const readOffset = reader.readOffset;
+const readAddressAt = reader.readAddressAt;
+const readBoolAt = reader.readBoolAt;
+const readFeeAt = reader.readFeeAt;
+const readU160At = reader.readU160At;
+const readSelectorU32 = reader.readSelectorU32;
+const selU32 = reader.selU32;
+const bytesAt = reader.bytesAt;
+const arrayHeadAt = reader.arrayHeadAt;
+const addressArrayAt = reader.addressArrayAt;
+const u256ArrayAt = reader.u256ArrayAt;
+const bytesArrayAt = reader.bytesArrayAt;
+const v3PathHops = reader.v3PathHops;
+const ArrayHead = reader.ArrayHead;
 
 // ============================================================================
 // Selectors
@@ -92,121 +122,6 @@ pub const selectors = struct {
     // Universal Router
     pub const execute = keccak.selector("execute(bytes,bytes[])");
     pub const execute_deadline = keccak.selector("execute(bytes,bytes[],uint256)");
-};
-
-// ============================================================================
-// Views
-// ============================================================================
-
-/// An ABI `address[]`, borrowed from calldata. Every element's 12 padding
-/// bytes were checked to be zero by `decode`, and `decode` guarantees
-/// `len() >= 2` (every swap path has a source and a destination token), so
-/// `first()` and `last()` are always valid.
-pub const AddressPath = struct {
-    /// `len() * 32` bytes: the array's elements, one ABI word each.
-    words: []const u8,
-
-    pub fn len(self: AddressPath) usize {
-        return self.words.len / 32;
-    }
-
-    /// Element `i`. Asserts `i < len()`.
-    pub fn get(self: AddressPath, i: usize) [20]u8 {
-        std.debug.assert(i < self.len());
-        const word = self.words[i * 32 ..][0..32].*;
-        return word[12..32].*;
-    }
-
-    /// First element. Asserts `len() > 0`.
-    pub fn first(self: AddressPath) [20]u8 {
-        std.debug.assert(self.len() > 0);
-        return self.get(0);
-    }
-
-    /// Last element. Asserts `len() > 0`.
-    pub fn last(self: AddressPath) [20]u8 {
-        const n = self.len();
-        std.debug.assert(n > 0);
-        return self.get(n - 1);
-    }
-};
-
-/// A Uniswap V3 packed path `token(20) fee(3) token(20) [fee(3) token(20)]...`,
-/// borrowed from calldata. `decode` checked that its length is `20 + 23 * k`
-/// with `k >= 1`.
-///
-/// Exact-output paths are encoded in reverse: `first()` is the token out and
-/// `last()` is the token in.
-pub const V3Path = struct {
-    bytes: []const u8,
-
-    pub const Hop = struct {
-        token_a: [20]u8,
-        fee: u24,
-        token_b: [20]u8,
-    };
-
-    /// Number of pools traversed (`k`). Always at least 1.
-    pub fn hops(self: V3Path) usize {
-        return (self.bytes.len - 20) / 23;
-    }
-
-    /// Hop `i`. Asserts `i < hops()`.
-    pub fn hop(self: V3Path, i: usize) Hop {
-        std.debug.assert(i < self.hops());
-        const off = i * 23;
-        return .{
-            .token_a = self.bytes[off..][0..20].*,
-            .fee = std.mem.readInt(u24, self.bytes[off + 20 ..][0..3], .big),
-            .token_b = self.bytes[off + 23 ..][0..20].*,
-        };
-    }
-
-    pub fn first(self: V3Path) [20]u8 {
-        return self.bytes[0..20].*;
-    }
-
-    pub fn last(self: V3Path) [20]u8 {
-        return self.bytes[self.bytes.len - 20 ..][0..20].*;
-    }
-};
-
-/// An ABI `uint256[]`, borrowed from calldata.
-pub const U256Array = struct {
-    /// `len() * 32` bytes.
-    words: []const u8,
-
-    pub fn len(self: U256Array) usize {
-        return self.words.len / 32;
-    }
-
-    /// Element `i`. Asserts `i < len()`.
-    pub fn get(self: U256Array, i: usize) u256 {
-        std.debug.assert(i < self.len());
-        return uint256.fromBigEndianBytes(self.words[i * 32 ..][0..32].*);
-    }
-};
-
-/// An ABI `bytes[]`, borrowed from calldata. `decode` checked every element's
-/// offset and length, and that the array is canonical: element `i`'s offset
-/// is at or past element `i - 1`'s data end, rounded up to a 32-byte word.
-/// This rejects aliased or overlapping elements and keeps validation linear
-/// in `data.len`.
-pub const BytesArray = struct {
-    /// The array's tail: starts at the first element's offset word, i.e.
-    /// immediately after the length word. Element offsets are relative to it.
-    head: []const u8,
-    count: usize,
-
-    pub fn len(self: BytesArray) usize {
-        return self.count;
-    }
-
-    /// Element `i`. Asserts `i < len()`.
-    pub fn get(self: BytesArray, i: usize) []const u8 {
-        std.debug.assert(i < self.count);
-        return bytesAt(self.head, 0, i * 32) orelse unreachable;
-    }
 };
 
 // ============================================================================
@@ -312,6 +227,30 @@ pub const Decoded = union(enum) {
     // Batches
     multicall: Multicall,
     universal_router_execute: UniversalRouterExecute,
+    // Phase 2 routers: returned only by `decodeFor` with the matching router,
+    // never by `decode`. See routers.zig.
+    aerodrome_swap_exact_tokens_for_tokens: routers.AerodromeExactIn,
+    aerodrome_swap_exact_eth_for_tokens: routers.AerodromeEthExactIn,
+    aerodrome_swap_exact_tokens_for_eth: routers.AerodromeExactIn,
+    aerodrome_unsafe_swap_exact_tokens_for_tokens: routers.AerodromeUnsafe,
+    aerodrome_swap_exact_tokens_for_tokens_fot: routers.AerodromeExactIn,
+    aerodrome_swap_exact_eth_for_tokens_fot: routers.AerodromeEthExactIn,
+    aerodrome_swap_exact_tokens_for_eth_fot: routers.AerodromeExactIn,
+    slipstream_exact_input_single: routers.SlipstreamExactInputSingle,
+    slipstream_exact_output_single: routers.SlipstreamExactOutputSingle,
+    /// Path hops carry `int24` tick spacing; read it with `Hop.tickSpacing()`.
+    slipstream_exact_input: V3ExactInput,
+    /// Path hops carry `int24` tick spacing; read it with `Hop.tickSpacing()`.
+    slipstream_exact_output: V3ExactOutput,
+    camelot_v2_swap_exact_tokens_for_tokens_fot: routers.CamelotV2ExactIn,
+    camelot_v2_swap_exact_eth_for_tokens_fot: routers.CamelotV2EthExactIn,
+    camelot_v2_swap_exact_tokens_for_eth_fot: routers.CamelotV2ExactIn,
+    camelot_v3_exact_input_single: routers.AlgebraExactInputSingle,
+    camelot_v3_exact_input_single_fot: routers.AlgebraExactInputSingle,
+    camelot_v3_exact_input: routers.AlgebraExactInput,
+    camelot_v3_exact_output: routers.AlgebraExactOutput,
+    pancake_exact_input_stable_swap: routers.PancakeStableExactIn,
+    pancake_exact_output_stable_swap: routers.PancakeStableExactOut,
 };
 
 // ============================================================================
@@ -333,14 +272,51 @@ pub const Multicall = struct {
         return .{ .calls = self.calls };
     }
 
-    /// One inner call. Inner swaps are decoded; everything else (including a
-    /// nested multicall or Universal Router execute) is `.other`.
+    /// One inner call. Inner swaps and the router's payment/permit helpers
+    /// are decoded; everything else (including a nested multicall or
+    /// Universal Router execute) is `.other`.
     pub const Call = union(enum) {
         swap: Decoded,
+        payment: Payment,
         other: struct {
             selector: [4]u8,
             data: []const u8,
         },
+    };
+
+    /// SwapRouter/SwapRouter02 helper calls (PeripheryPayments*, SelfPermit).
+    /// A null `recipient` means the overload without one (SwapRouter02
+    /// extended: pays `msg.sender`).
+    pub const Payment = union(enum) {
+        /// unwrapWETH9(uint256[,address])
+        unwrap_weth9: struct { amount_minimum: u256, recipient: ?[20]u8 },
+        /// unwrapWETH9WithFee(uint256,[address,]uint256,address)
+        unwrap_weth9_with_fee: struct { amount_minimum: u256, recipient: ?[20]u8, fee_bips: u256, fee_recipient: [20]u8 },
+        /// sweepToken(address,uint256[,address])
+        sweep_token: struct { token: [20]u8, amount_minimum: u256, recipient: ?[20]u8 },
+        /// sweepTokenWithFee(address,uint256,[address,]uint256,address)
+        sweep_token_with_fee: struct { token: [20]u8, amount_minimum: u256, recipient: ?[20]u8, fee_bips: u256, fee_recipient: [20]u8 },
+        /// refundETH()
+        refund_eth,
+        /// wrapETH(uint256)
+        wrap_eth: struct { value: u256 },
+        /// pull(address,uint256)
+        pull: struct { token: [20]u8, value: u256 },
+        self_permit: SelfPermit,
+    };
+
+    /// selfPermit / selfPermitIfNecessary (EIP-2612: `amount` is the value,
+    /// `deadline` the deadline) and selfPermitAllowed /
+    /// selfPermitAllowedIfNecessary (DAI-style: `amount` is the nonce,
+    /// `deadline` the expiry).
+    pub const SelfPermit = struct {
+        kind: enum { permit, permit_if_necessary, allowed, allowed_if_necessary },
+        token: [20]u8,
+        amount: u256,
+        deadline: u256,
+        v: u8,
+        r: [32]u8,
+        s: [32]u8,
     };
 
     pub const Iterator = struct {
@@ -381,21 +357,42 @@ pub const command_types = struct {
     pub const unwrap_weth: u8 = 0x0c;
 };
 
-/// Universal Router `execute`. `deadline` is null for `execute(bytes,bytes[])`.
+/// Which command table a Universal Router deployment uses. The same command
+/// byte means different things on different deployments.
+pub const UrDialect = enum {
+    /// Uniswap UR with V4 (Commands.sol @ a9c574f): 0x10 V4_SWAP, 0x21
+    /// EXECUTE_SUB_PLAN. What `decode` assumes.
+    uniswap,
+    /// Pre-V4 Uniswap UR (e.g. 0x3fC91A3a…7FAD): 0x10 and above are NFT
+    /// commands, surfaced as `.other`.
+    uniswap_v1,
+    /// PancakeSwap UR: pre-V4 table plus 0x20 EXECUTE_SUB_PLAN and 0x22/0x23
+    /// stable swaps.
+    pancake,
+};
+
+/// Universal Router `execute`. `deadline` is null for `execute(bytes,bytes[])`
+/// and for a sub-plan.
 pub const UniversalRouterExecute = struct {
     /// One byte per command.
     commands: []const u8,
     /// One ABI-encoded input per command; `inputs.len() == commands.len`.
     inputs: BytesArray,
     deadline: ?u256,
+    dialect: UrDialect = .uniswap,
+    /// True for an EXECUTE_SUB_PLAN payload. Sub-plans nest one level: a
+    /// sub-plan command inside a sub-plan is `.other`.
+    is_sub_plan: bool = false,
 
     pub fn iterator(self: UniversalRouterExecute) Iterator {
-        return .{ .commands = self.commands, .inputs = self.inputs };
+        return .{ .commands = self.commands, .inputs = self.inputs, .dialect = self.dialect, .is_sub_plan = self.is_sub_plan };
     }
 
     pub const Iterator = struct {
         commands: []const u8,
         inputs: BytesArray,
+        dialect: UrDialect = .uniswap,
+        is_sub_plan: bool = false,
         index: usize = 0,
 
         pub fn next(self: *Iterator) ?Command {
@@ -490,6 +487,84 @@ pub const Command = struct {
         amount: u256,
     };
 
+    /// Permit2 `PermitDetails`.
+    pub const PermitDetails = struct {
+        token: [20]u8,
+        amount: u160,
+        expiration: u48,
+        nonce: u48,
+    };
+
+    /// An ABI `PermitDetails[]` (static tuples, 4 words each), borrowed from
+    /// calldata; every element was validated.
+    pub const PermitDetailsArray = struct {
+        words: []const u8,
+
+        pub fn len(self: PermitDetailsArray) usize {
+            _ = self;
+            @panic("todo");
+        }
+
+        pub fn get(self: PermitDetailsArray, i: usize) PermitDetails {
+            _ = self;
+            _ = i;
+            @panic("todo");
+        }
+    };
+
+    /// Permit2 `AllowanceTransferDetails`.
+    pub const AllowanceTransfer = struct {
+        from: [20]u8,
+        to: [20]u8,
+        amount: u160,
+        token: [20]u8,
+    };
+
+    /// An ABI `AllowanceTransferDetails[]` (static tuples, 4 words each).
+    pub const AllowanceTransferArray = struct {
+        words: []const u8,
+
+        pub fn len(self: AllowanceTransferArray) usize {
+            _ = self;
+            @panic("todo");
+        }
+
+        pub fn get(self: AllowanceTransferArray, i: usize) AllowanceTransfer {
+            _ = self;
+            _ = i;
+            @panic("todo");
+        }
+    };
+
+    /// PERMIT2_PERMIT (0x0a): `(PermitSingle, bytes signature)`.
+    pub const Permit2Permit = struct {
+        details: PermitDetails,
+        spender: [20]u8,
+        sig_deadline: u256,
+        signature: []const u8,
+    };
+
+    /// PERMIT2_PERMIT_BATCH (0x03): `(PermitBatch, bytes signature)`.
+    pub const Permit2PermitBatch = struct {
+        details: PermitDetailsArray,
+        spender: [20]u8,
+        sig_deadline: u256,
+        signature: []const u8,
+    };
+
+    /// PancakeSwap UR stable swap (0x22 exact in / 0x23 exact out).
+    /// `amount0`/`amount1` are amountIn/amountOutMin for exact in and
+    /// amountOut/amountInMax for exact out. `flags[i]` selects the stable
+    /// pool for hop i.
+    pub const StableSwap = struct {
+        recipient: [20]u8,
+        amount0: u256,
+        amount1: u256,
+        path: AddressPath,
+        flags: U256Array,
+        payer_is_user: bool,
+    };
+
     pub const Payload = union(enum) {
         v3_swap_exact_in: V3SwapExactIn,
         v3_swap_exact_out: V3SwapExactOut,
@@ -505,194 +580,33 @@ pub const Command = struct {
         wrap_eth: RecipientAmount,
         /// `amount` is the minimum WETH to unwrap.
         unwrap_weth: RecipientAmount,
-        /// Any other command type (V4_SWAP, PERMIT2_*, ...), undecoded.
+        /// `amount` is the portion with 1e18 = 100%.
+        pay_portion_full_precision: TokenRecipientAmount,
+        /// BALANCE_CHECK_ERC20 (0x0e).
+        balance_check_erc20: struct { owner: [20]u8, token: [20]u8, min_balance: u256 },
+        permit2_permit: Permit2Permit,
+        permit2_permit_batch: Permit2PermitBatch,
+        /// PERMIT2_TRANSFER_FROM (0x02).
+        permit2_transfer_from: struct { token: [20]u8, recipient: [20]u8, amount: u160 },
+        /// PERMIT2_TRANSFER_FROM_BATCH (0x0d).
+        permit2_transfer_from_batch: AllowanceTransferArray,
+        /// V4_SWAP (0x10, `.uniswap` dialect only).
+        v4_swap: v4.Plan,
+        /// EXECUTE_SUB_PLAN: a nested `execute` with `deadline == null` and
+        /// `is_sub_plan == true`.
+        execute_sub_plan: UniversalRouterExecute,
+        /// PancakeSwap 0x22 (`.pancake` dialect only).
+        stable_swap_exact_in: StableSwap,
+        /// PancakeSwap 0x23 (`.pancake` dialect only).
+        stable_swap_exact_out: StableSwap,
+        /// Any other command type (position managers, NFT commands, ...),
+        /// undecoded.
         other: struct {
             command_type: u8,
             input: []const u8,
         },
     };
 };
-
-// ============================================================================
-// Decoding: safe arithmetic and word-level readers
-// ============================================================================
-//
-// Every helper below either returns null or a value; none can panic. Offsets
-// and lengths taken from calldata are always u256 words, range-checked into
-// usize before any arithmetic touches them, and every byte range is bounds
-// checked against `data.len` before it is sliced.
-
-fn addChecked(a: usize, b: usize) ?usize {
-    return std.math.add(usize, a, b) catch null;
-}
-
-fn mulChecked(a: usize, b: usize) ?usize {
-    return std.math.mul(usize, a, b) catch null;
-}
-
-/// Round `n` up to the next 32-byte word boundary, checked against overflow.
-fn roundUpWord(n: usize) ?usize {
-    const padded = addChecked(n, 31) orelse return null;
-    return padded & ~@as(usize, 31);
-}
-
-fn wordToUsize(w: u256) ?usize {
-    if (w > std.math.maxInt(usize)) return null;
-    return @intCast(w);
-}
-
-fn isZeroSlice(s: []const u8) bool {
-    for (s) |b| {
-        if (b != 0) return false;
-    }
-    return true;
-}
-
-/// Read the 32-byte word at `offset`, or null if it runs past `data`.
-fn readWord(data: []const u8, offset: usize) ?[32]u8 {
-    const end = addChecked(offset, 32) orelse return null;
-    if (end > data.len) return null;
-    return data[offset..][0..32].*;
-}
-
-fn readU256At(data: []const u8, offset: usize) ?u256 {
-    const w = readWord(data, offset) orelse return null;
-    return uint256.fromBigEndianBytes(w);
-}
-
-/// Read a word meant to be used as an offset or length, range-checked into
-/// `usize` before any arithmetic can touch it.
-fn readOffset(data: []const u8, word_pos: usize) ?usize {
-    const w = readU256At(data, word_pos) orelse return null;
-    return wordToUsize(w);
-}
-
-/// A clean ABI address word: 12 zero high bytes, address in the low 20.
-fn readAddressAt(data: []const u8, pos: usize) ?[20]u8 {
-    const w = readWord(data, pos) orelse return null;
-    if (!isZeroSlice(w[0..12])) return null;
-    return w[12..32].*;
-}
-
-/// A clean ABI bool word: all zero except the last byte, which is 0 or 1.
-fn readBoolAt(data: []const u8, pos: usize) ?bool {
-    const w = readWord(data, pos) orelse return null;
-    if (!isZeroSlice(w[0..31])) return null;
-    if (w[31] > 1) return null;
-    return w[31] == 1;
-}
-
-/// A clean ABI uint24 word: only the low 3 bytes may be set.
-fn readFeeAt(data: []const u8, pos: usize) ?u24 {
-    const w = readWord(data, pos) orelse return null;
-    if (!isZeroSlice(w[0..29])) return null;
-    return std.mem.readInt(u24, w[29..32], .big);
-}
-
-/// A clean ABI uint160 word: only the low 20 bytes may be set.
-fn readU160At(data: []const u8, pos: usize) ?u160 {
-    const w = readWord(data, pos) orelse return null;
-    if (!isZeroSlice(w[0..12])) return null;
-    return std.mem.readInt(u160, w[12..32], .big);
-}
-
-fn readSelectorU32(data: []const u8) u32 {
-    return std.mem.readInt(u32, data[0..4], .big);
-}
-
-fn selU32(s: [4]u8) u32 {
-    return std.mem.readInt(u32, &s, .big);
-}
-
-// ============================================================================
-// Decoding: dynamic value locators
-// ============================================================================
-//
-// `base` is the start of the enclosing tuple or argument block; `offset_word_pos`
-// is the absolute position of the word holding the offset, relative to `base`.
-
-/// Locate a dynamic `bytes` value's content.
-fn bytesAt(data: []const u8, base: usize, offset_word_pos: usize) ?[]const u8 {
-    const off = readOffset(data, offset_word_pos) orelse return null;
-    const start = addChecked(base, off) orelse return null;
-    const len = wordToUsize(readU256At(data, start) orelse return null) orelse return null;
-    const content_start = addChecked(start, 32) orelse return null;
-    const content_end = addChecked(content_start, len) orelse return null;
-    if (content_end > data.len) return null;
-    return data[content_start..content_end];
-}
-
-const ArrayHead = struct {
-    /// First element's byte position (right after the length word).
-    start: usize,
-    /// End of the head words region (`start + count * 32`).
-    end: usize,
-    count: usize,
-};
-
-/// Locate a dynamic array's length and head-words region, bounds checked.
-fn arrayHeadAt(data: []const u8, base: usize, offset_word_pos: usize) ?ArrayHead {
-    const off = readOffset(data, offset_word_pos) orelse return null;
-    const arr_start = addChecked(base, off) orelse return null;
-    const count = wordToUsize(readU256At(data, arr_start) orelse return null) orelse return null;
-    const head_start = addChecked(arr_start, 32) orelse return null;
-    const head_len = mulChecked(count, 32) orelse return null;
-    const head_end = addChecked(head_start, head_len) orelse return null;
-    if (head_end > data.len) return null;
-    return .{ .start = head_start, .end = head_end, .count = count };
-}
-
-/// An `address[]` swap path, validating every element's padding eagerly and
-/// requiring at least 2 elements (a swap path always has a source and a
-/// destination token; see UniswapV2Library.sol:63,74 and UR
-/// V2SwapRouter.sol:75,112).
-fn addressArrayAt(data: []const u8, base: usize, offset_word_pos: usize) ?AddressPath {
-    const h = arrayHeadAt(data, base, offset_word_pos) orelse return null;
-    if (h.count < 2) return null;
-    const words = data[h.start..h.end];
-    var i: usize = 0;
-    while (i < h.count) : (i += 1) {
-        if (!isZeroSlice(words[i * 32 ..][0..12])) return null;
-    }
-    return .{ .words = words };
-}
-
-/// A `uint256[]`; every 32-byte word is a valid element.
-fn u256ArrayAt(data: []const u8, base: usize, offset_word_pos: usize) ?U256Array {
-    const h = arrayHeadAt(data, base, offset_word_pos) orelse return null;
-    return .{ .words = data[h.start..h.end] };
-}
-
-/// A `bytes[]` array's location, requiring a canonical layout: element `i`'s
-/// offset must be at or past element `i - 1`'s data end, rounded up to a
-/// 32-byte word. This rejects aliased or overlapping elements and keeps
-/// validation linear in `data.len`. Used for both multicall calls and UR
-/// inputs, which share this requirement.
-fn bytesArrayAt(data: []const u8, base: usize, offset_word_pos: usize) ?BytesArray {
-    const h = arrayHeadAt(data, base, offset_word_pos) orelse return null;
-    const head = data[h.start..];
-    var prev_end: usize = 0;
-    var i: usize = 0;
-    while (i < h.count) : (i += 1) {
-        const off = readOffset(head, i * 32) orelse return null;
-        if (i > 0 and off < prev_end) return null;
-        const elem_len = wordToUsize(readU256At(head, off) orelse return null) orelse return null;
-        const content_start = addChecked(off, 32) orelse return null;
-        const content_end = addChecked(content_start, elem_len) orelse return null;
-        if (content_end > head.len) return null;
-        prev_end = roundUpWord(content_end) orelse return null;
-    }
-    return .{ .head = head, .count = h.count };
-}
-
-/// `k` for a V3 packed path of this byte length, or null if it isn't
-/// `20 + 23 * k` with `k >= 1`.
-fn v3PathHops(len: usize) ?usize {
-    if (len < 43) return null;
-    const rem = len - 20;
-    if (rem % 23 != 0) return null;
-    return rem / 23;
-}
 
 // ============================================================================
 // Decoding: UniswapV2Router02 / SwapRouter02 V2-style swaps
@@ -1081,6 +995,21 @@ fn decodeDispatch(data: []const u8, allow_batch: bool) ?Decoded {
         else => null,
     };
 }
+
+/// Like `decode`, but Universal Router `execute` calldata is read with the
+/// given command table. `decode(data)` is `decodeWithUrDialect(data, .uniswap)`.
+pub fn decodeWithUrDialect(data: []const u8, dialect: UrDialect) ?Decoded {
+    _ = dialect;
+    return decode(data);
+}
+
+/// Router-aware decoding for routers whose selectors collide with Uniswap's
+/// but mean something else (Slipstream, Camelot, Pancake, pre-V4 UR).
+pub const decodeFor = routers.decodeFor;
+pub const Router = routers.Router;
+pub const Protocol = routers.Protocol;
+pub const Deployment = routers.Deployment;
+pub const routerAt = routers.routerAt;
 
 /// Decode router calldata. Returns null for unknown selectors and for any
 /// malformed or truncated input; never panics and never allocates.

@@ -181,4 +181,6 @@ test {
     _ = @import("dex/router.zig");
     _ = @import("dex/calldata.zig");
     _ = @import("dex/calldata_test.zig");
+    _ = @import("dex/v4_test.zig");
+    _ = @import("dex/routers_test.zig");
 }
