@@ -727,7 +727,7 @@ test "fixture: bsc_pancake_ur_0x3593564c_22080604 stable swap + v2 swap + pay_po
         .stable_swap_exact_in => |p| p,
         else => return error.WrongVariant,
     };
-    try testing.expectEqualSlices(u8, &addr("ea26b78255df2bbc31c1ebf60010d78670185bd"), &stable_in.recipient);
+    try testing.expectEqualSlices(u8, &addr("ea26b78255df2bbc31c1ebf60010d78670185bd0"), &stable_in.recipient);
     try testing.expectEqual(@as(u256, 51000000000000000000), stable_in.amount0);
     try testing.expectEqual(@as(u256, 0), stable_in.amount1);
     try testing.expectEqual(@as(usize, 2), stable_in.path.len());

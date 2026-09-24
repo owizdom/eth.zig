@@ -71,6 +71,7 @@ const readAddressAt = reader.readAddressAt;
 const readBoolAt = reader.readBoolAt;
 const readFeeAt = reader.readFeeAt;
 const readU160At = reader.readU160At;
+const readUintAt = reader.readUintAt;
 const readSelectorU32 = reader.readSelectorU32;
 const selU32 = reader.selU32;
 const bytesAt = reader.bytesAt;
@@ -272,7 +273,7 @@ pub const Multicall = struct {
     }
 
     pub fn iterator(self: Multicall) Iterator {
-        return .{ .calls = self.calls };
+        return .{ .calls = self.calls, .router = self.router };
     }
 
     /// One inner call. Inner swaps and the router's payment/permit helpers
@@ -324,18 +325,14 @@ pub const Multicall = struct {
 
     pub const Iterator = struct {
         calls: BytesArray,
+        router: routers.Router = .uniswap,
         index: usize = 0,
 
         pub fn next(self: *Iterator) ?Call {
             if (self.index >= self.calls.len()) return null;
             const inner = self.calls.get(self.index);
             self.index += 1;
-            const sel = readSelectorU32(inner);
-            if (isSwapSelector(sel)) {
-                const decoded = decodeDispatch(inner, false) orelse unreachable;
-                return .{ .swap = decoded };
-            }
-            return .{ .other = .{ .selector = inner[0..4].*, .data = inner } };
+            return decodeMulticallInner(self.router, inner) orelse unreachable;
         }
     };
 };
@@ -360,6 +357,21 @@ pub const command_types = struct {
     pub const unwrap_weth: u8 = 0x0c;
 };
 
+/// Command bytes typed by Wave A (spec 0002), kept out of the frozen
+/// `command_types` table above.
+const ur_cmd = struct {
+    const permit2_transfer_from: u8 = 0x02;
+    const permit2_permit_batch: u8 = 0x03;
+    const pay_portion_full_precision: u8 = 0x07;
+    const permit2_permit: u8 = 0x0a;
+    const permit2_transfer_from_batch: u8 = 0x0d;
+    const balance_check_erc20: u8 = 0x0e;
+    const v4_swap: u8 = 0x10;
+    const execute_sub_plan: u8 = 0x21;
+    const pancake_stable_swap_exact_in: u8 = 0x22;
+    const pancake_stable_swap_exact_out: u8 = 0x23;
+};
+
 /// Which command table a Universal Router deployment uses. The same command
 /// byte means different things on different deployments.
 pub const UrDialect = enum {
@@ -376,6 +388,14 @@ pub const UrDialect = enum {
     /// `.other`, as is every other command.
     pancake,
 };
+
+/// The command-type mask a dialect's command table uses.
+fn commandTypeMask(dialect: UrDialect) u8 {
+    return switch (dialect) {
+        .uniswap => command_types.command_type_mask,
+        .uniswap_v1, .pancake => 0x3f,
+    };
+}
 
 /// Universal Router `execute`. `deadline` is null for `execute(bytes,bytes[])`
 /// and for a sub-plan.
@@ -406,8 +426,8 @@ pub const UniversalRouterExecute = struct {
             const raw = self.commands[self.index];
             const input = self.inputs.get(self.index);
             self.index += 1;
-            const command_type = raw & command_types.command_type_mask;
-            const payload = parseCommandPayload(command_type, input) orelse unreachable;
+            const command_type = raw & commandTypeMask(self.dialect);
+            const payload = parseCommandPayload(self.dialect, self.is_sub_plan, command_type, input) orelse unreachable;
             return .{
                 .raw = raw,
                 .allow_revert = (raw & command_types.flag_allow_revert) != 0,
@@ -507,14 +527,18 @@ pub const Command = struct {
         words: []const u8,
 
         pub fn len(self: PermitDetailsArray) usize {
-            _ = self;
-            @panic("todo");
+            return self.words.len / 128;
         }
 
         pub fn get(self: PermitDetailsArray, i: usize) PermitDetails {
-            _ = self;
-            _ = i;
-            @panic("todo");
+            std.debug.assert(i < self.len());
+            const eb = i * 128;
+            return .{
+                .token = readAddressAt(self.words, eb) orelse unreachable,
+                .amount = readUintAt(u160, self.words, eb + 32) orelse unreachable,
+                .expiration = readUintAt(u48, self.words, eb + 64) orelse unreachable,
+                .nonce = readUintAt(u48, self.words, eb + 96) orelse unreachable,
+            };
         }
     };
 
@@ -531,14 +555,18 @@ pub const Command = struct {
         words: []const u8,
 
         pub fn len(self: AllowanceTransferArray) usize {
-            _ = self;
-            @panic("todo");
+            return self.words.len / 128;
         }
 
         pub fn get(self: AllowanceTransferArray, i: usize) AllowanceTransfer {
-            _ = self;
-            _ = i;
-            @panic("todo");
+            std.debug.assert(i < self.len());
+            const eb = i * 128;
+            return .{
+                .from = readAddressAt(self.words, eb) orelse unreachable,
+                .to = readAddressAt(self.words, eb + 32) orelse unreachable,
+                .amount = readUintAt(u160, self.words, eb + 64) orelse unreachable,
+                .token = readAddressAt(self.words, eb + 96) orelse unreachable,
+            };
         }
     };
 
@@ -849,38 +877,171 @@ fn parseRecipientAmount(input: []const u8) ?Command.RecipientAmount {
     return .{ .recipient = recipient, .amount = amount };
 }
 
-/// Dispatch on the masked command type. Unknown types always succeed as
-/// `.other`; known types must parse or the whole command is invalid.
-fn parseCommandPayload(command_type: u8, input: []const u8) ?Command.Payload {
+/// PERMIT2_PERMIT (0x0a): `PermitSingle` inline (4-word `PermitDetails`,
+/// spender, sigDeadline), then `bytes signature` at arg 6.
+fn parsePermit2Permit(input: []const u8) ?Command.Permit2Permit {
+    const token = readAddressAt(input, 0) orelse return null;
+    const amount = readUintAt(u160, input, 32) orelse return null;
+    const expiration = readUintAt(u48, input, 64) orelse return null;
+    const nonce = readUintAt(u48, input, 96) orelse return null;
+    const spender = readAddressAt(input, 128) orelse return null;
+    const sig_deadline = readU256At(input, 160) orelse return null;
+    const signature = bytesAt(input, 0, 192) orelse return null;
+    return .{
+        .details = .{ .token = token, .amount = amount, .expiration = expiration, .nonce = nonce },
+        .spender = spender,
+        .sig_deadline = sig_deadline,
+        .signature = signature,
+    };
+}
+
+/// A `PermitDetails[]` (static 4-word tuples), located and eagerly validated
+/// the way `bytesArrayAt` locates a `bytes[]`, but with an inline (offset-less)
+/// element layout, so every element sits directly in the array's data.
+fn permitDetailsArrayAt(data: []const u8, base: usize, offset_word_pos: usize) ?Command.PermitDetailsArray {
+    const off = readOffset(data, offset_word_pos) orelse return null;
+    const arr_start = addChecked(base, off) orelse return null;
+    const count = wordToUsize(readU256At(data, arr_start) orelse return null) orelse return null;
+    const head_start = addChecked(arr_start, 32) orelse return null;
+    const head_len = mulChecked(count, 128) orelse return null;
+    const head_end = addChecked(head_start, head_len) orelse return null;
+    if (head_end > data.len) return null;
+    const words = data[head_start..head_end];
+    var i: usize = 0;
+    while (i < count) : (i += 1) {
+        const eb = i * 128;
+        _ = readAddressAt(words, eb) orelse return null;
+        _ = readUintAt(u160, words, eb + 32) orelse return null;
+        _ = readUintAt(u48, words, eb + 64) orelse return null;
+        _ = readUintAt(u48, words, eb + 96) orelse return null;
+    }
+    return .{ .words = words };
+}
+
+/// An `AllowanceTransferDetails[]` (static 4-word tuples); same shape as
+/// `permitDetailsArrayAt` but with `(from, to, amount, token)` fields.
+fn allowanceTransferArrayAt(data: []const u8, base: usize, offset_word_pos: usize) ?Command.AllowanceTransferArray {
+    const off = readOffset(data, offset_word_pos) orelse return null;
+    const arr_start = addChecked(base, off) orelse return null;
+    const count = wordToUsize(readU256At(data, arr_start) orelse return null) orelse return null;
+    const head_start = addChecked(arr_start, 32) orelse return null;
+    const head_len = mulChecked(count, 128) orelse return null;
+    const head_end = addChecked(head_start, head_len) orelse return null;
+    if (head_end > data.len) return null;
+    const words = data[head_start..head_end];
+    var i: usize = 0;
+    while (i < count) : (i += 1) {
+        const eb = i * 128;
+        _ = readAddressAt(words, eb) orelse return null;
+        _ = readAddressAt(words, eb + 32) orelse return null;
+        _ = readUintAt(u160, words, eb + 64) orelse return null;
+        _ = readAddressAt(words, eb + 96) orelse return null;
+    }
+    return .{ .words = words };
+}
+
+/// PERMIT2_PERMIT_BATCH (0x03): `(PermitBatch{details,spender,sigDeadline}
+/// via offset, bytes signature)`.
+fn parsePermit2PermitBatch(input: []const u8) ?Command.Permit2PermitBatch {
+    const t = readOffset(input, 0) orelse return null;
+    const details = permitDetailsArrayAt(input, t, t) orelse return null;
+    const spender_pos = addChecked(t, 32) orelse return null;
+    const spender = readAddressAt(input, spender_pos) orelse return null;
+    const sig_deadline_pos = addChecked(t, 64) orelse return null;
+    const sig_deadline = readU256At(input, sig_deadline_pos) orelse return null;
+    const signature = bytesAt(input, 0, 32) orelse return null;
+    return .{ .details = details, .spender = spender, .sig_deadline = sig_deadline, .signature = signature };
+}
+
+/// PancakeSwap UR stable swap (0x22/0x23): `(recipient, amount0, amount1,
+/// address[] path, uint256[] flags, bool payerIsUser)`.
+fn parseStableSwap(input: []const u8) ?Command.StableSwap {
+    const recipient = readAddressAt(input, 0) orelse return null;
+    const amount0 = readU256At(input, 32) orelse return null;
+    const amount1 = readU256At(input, 64) orelse return null;
+    const path = addressArrayAt(input, 0, 96) orelse return null;
+    const flags = u256ArrayAt(input, 0, 128) orelse return null;
+    const payer_is_user = readBoolAt(input, 160) orelse return null;
+    return .{ .recipient = recipient, .amount0 = amount0, .amount1 = amount1, .path = path, .flags = flags, .payer_is_user = payer_is_user };
+}
+
+/// Dispatch on the masked command type, for `dialect`. `is_sub_plan` forces
+/// EXECUTE_SUB_PLAN (0x21) to `.other`: a sub-plan command inside a sub-plan
+/// nests no further. Unknown or dialect-inapplicable types always succeed as
+/// `.other`; known, applicable types must parse or the whole command is
+/// invalid.
+fn parseCommandPayload(dialect: UrDialect, is_sub_plan: bool, command_type: u8, input: []const u8) ?Command.Payload {
     return switch (command_type) {
         command_types.v3_swap_exact_in => .{ .v3_swap_exact_in = parseV3SwapExactIn(input) orelse return null },
         command_types.v3_swap_exact_out => .{ .v3_swap_exact_out = parseV3SwapExactOut(input) orelse return null },
-        command_types.v2_swap_exact_in => .{ .v2_swap_exact_in = parseV2SwapExactIn(input) orelse return null },
-        command_types.v2_swap_exact_out => .{ .v2_swap_exact_out = parseV2SwapExactOut(input) orelse return null },
+        ur_cmd.permit2_transfer_from => blk: {
+            const token = readAddressAt(input, 0) orelse return null;
+            const recipient = readAddressAt(input, 32) orelse return null;
+            const amount = readUintAt(u160, input, 64) orelse return null;
+            break :blk .{ .permit2_transfer_from = .{ .token = token, .recipient = recipient, .amount = amount } };
+        },
+        ur_cmd.permit2_permit_batch => .{ .permit2_permit_batch = parsePermit2PermitBatch(input) orelse return null },
         command_types.sweep => .{ .sweep = parseTokenRecipientAmount(input) orelse return null },
         command_types.transfer => .{ .transfer = parseTokenRecipientAmount(input) orelse return null },
         command_types.pay_portion => .{ .pay_portion = parseTokenRecipientAmount(input) orelse return null },
+        ur_cmd.pay_portion_full_precision => if (dialect == .uniswap)
+            Command.Payload{ .pay_portion_full_precision = parseTokenRecipientAmount(input) orelse return null }
+        else
+            Command.Payload{ .other = .{ .command_type = command_type, .input = input } },
+        command_types.v2_swap_exact_in => .{ .v2_swap_exact_in = parseV2SwapExactIn(input) orelse return null },
+        command_types.v2_swap_exact_out => .{ .v2_swap_exact_out = parseV2SwapExactOut(input) orelse return null },
+        ur_cmd.permit2_permit => .{ .permit2_permit = parsePermit2Permit(input) orelse return null },
         command_types.wrap_eth => .{ .wrap_eth = parseRecipientAmount(input) orelse return null },
         command_types.unwrap_weth => .{ .unwrap_weth = parseRecipientAmount(input) orelse return null },
+        ur_cmd.permit2_transfer_from_batch => blk: {
+            const arr = allowanceTransferArrayAt(input, 0, 0) orelse return null;
+            break :blk .{ .permit2_transfer_from_batch = arr };
+        },
+        ur_cmd.balance_check_erc20 => blk: {
+            const owner = readAddressAt(input, 0) orelse return null;
+            const token = readAddressAt(input, 32) orelse return null;
+            const min_balance = readU256At(input, 64) orelse return null;
+            break :blk .{ .balance_check_erc20 = .{ .owner = owner, .token = token, .min_balance = min_balance } };
+        },
+        ur_cmd.v4_swap => if (dialect == .uniswap)
+            Command.Payload{ .v4_swap = v4.parsePlan(input) orelse return null }
+        else
+            Command.Payload{ .other = .{ .command_type = command_type, .input = input } },
+        ur_cmd.execute_sub_plan => if (!is_sub_plan and dialect != .pancake)
+            Command.Payload{ .execute_sub_plan = parseUniversalRouterExecute(input, 0, false, dialect, true) orelse return null }
+        else
+            Command.Payload{ .other = .{ .command_type = command_type, .input = input } },
+        ur_cmd.pancake_stable_swap_exact_in => if (dialect == .pancake)
+            Command.Payload{ .stable_swap_exact_in = parseStableSwap(input) orelse return null }
+        else
+            Command.Payload{ .other = .{ .command_type = command_type, .input = input } },
+        ur_cmd.pancake_stable_swap_exact_out => if (dialect == .pancake)
+            Command.Payload{ .stable_swap_exact_out = parseStableSwap(input) orelse return null }
+        else
+            Command.Payload{ .other = .{ .command_type = command_type, .input = input } },
         else => .{ .other = .{ .command_type = command_type, .input = input } },
     };
 }
 
 /// `execute(bytes commands, bytes[] inputs, [uint256 deadline])`. Every
 /// command's payload is validated here so the iterator can be infallible.
-fn parseUniversalRouterExecute(data: []const u8, args_base: usize, has_deadline: bool) ?UniversalRouterExecute {
+/// `dialect` picks the command table; `is_sub_plan` is true when `data` is
+/// itself an EXECUTE_SUB_PLAN payload (`args_base == 0`, `has_deadline ==
+/// false`).
+fn parseUniversalRouterExecute(data: []const u8, args_base: usize, has_deadline: bool, dialect: UrDialect, is_sub_plan: bool) ?UniversalRouterExecute {
     const commands = bytesAt(data, args_base, args_base) orelse return null;
     const inputs = bytesArrayAt(data, args_base, args_base + 32) orelse return null;
     if (commands.len != inputs.count) return null;
     const deadline: ?u256 = if (has_deadline) (readU256At(data, args_base + 64) orelse return null) else null;
 
+    const mask = commandTypeMask(dialect);
     var i: usize = 0;
     while (i < commands.len) : (i += 1) {
         const input_i = bytesAt(inputs.head, 0, i * 32) orelse return null;
-        const command_type = commands[i] & command_types.command_type_mask;
-        _ = parseCommandPayload(command_type, input_i) orelse return null;
+        const command_type = commands[i] & mask;
+        _ = parseCommandPayload(dialect, is_sub_plan, command_type, input_i) orelse return null;
     }
-    return .{ .commands = commands, .inputs = inputs, .deadline = deadline };
+    return .{ .commands = commands, .inputs = inputs, .deadline = deadline, .dialect = dialect, .is_sub_plan = is_sub_plan };
 }
 
 // ============================================================================
@@ -889,10 +1050,166 @@ fn parseUniversalRouterExecute(data: []const u8, args_base: usize, has_deadline:
 
 const MulticallKind = enum { plain, with_deadline, with_blockhash };
 
+/// Selectors for the SwapRouter/SwapRouter02 payment and permit helpers
+/// (`PeripheryPayments*`, `SelfPermit`) a multicall inner call can carry.
+const multicall_payment_selectors = struct {
+    const unwrap_weth9 = keccak.selector("unwrapWETH9(uint256)");
+    const unwrap_weth9_recipient = keccak.selector("unwrapWETH9(uint256,address)");
+    const unwrap_weth9_with_fee = keccak.selector("unwrapWETH9WithFee(uint256,uint256,address)");
+    const unwrap_weth9_with_fee_recipient = keccak.selector("unwrapWETH9WithFee(uint256,address,uint256,address)");
+    const sweep_token = keccak.selector("sweepToken(address,uint256)");
+    const sweep_token_recipient = keccak.selector("sweepToken(address,uint256,address)");
+    const sweep_token_with_fee = keccak.selector("sweepTokenWithFee(address,uint256,uint256,address)");
+    const sweep_token_with_fee_recipient = keccak.selector("sweepTokenWithFee(address,uint256,address,uint256,address)");
+    const refund_eth = keccak.selector("refundETH()");
+    const wrap_eth = keccak.selector("wrapETH(uint256)");
+    const pull = keccak.selector("pull(address,uint256)");
+    const self_permit = keccak.selector("selfPermit(address,uint256,uint256,uint8,bytes32,bytes32)");
+    const self_permit_if_necessary = keccak.selector("selfPermitIfNecessary(address,uint256,uint256,uint8,bytes32,bytes32)");
+    const self_permit_allowed = keccak.selector("selfPermitAllowed(address,uint256,uint256,uint8,bytes32,bytes32)");
+    const self_permit_allowed_if_necessary = keccak.selector("selfPermitAllowedIfNecessary(address,uint256,uint256,uint8,bytes32,bytes32)");
+};
+
+fn isMulticallPaymentSelector(sel: u32) bool {
+    return switch (sel) {
+        selU32(multicall_payment_selectors.unwrap_weth9),
+        selU32(multicall_payment_selectors.unwrap_weth9_recipient),
+        selU32(multicall_payment_selectors.unwrap_weth9_with_fee),
+        selU32(multicall_payment_selectors.unwrap_weth9_with_fee_recipient),
+        selU32(multicall_payment_selectors.sweep_token),
+        selU32(multicall_payment_selectors.sweep_token_recipient),
+        selU32(multicall_payment_selectors.sweep_token_with_fee),
+        selU32(multicall_payment_selectors.sweep_token_with_fee_recipient),
+        selU32(multicall_payment_selectors.refund_eth),
+        selU32(multicall_payment_selectors.wrap_eth),
+        selU32(multicall_payment_selectors.pull),
+        selU32(multicall_payment_selectors.self_permit),
+        selU32(multicall_payment_selectors.self_permit_if_necessary),
+        selU32(multicall_payment_selectors.self_permit_allowed),
+        selU32(multicall_payment_selectors.self_permit_allowed_if_necessary),
+        => true,
+        else => false,
+    };
+}
+
+const SelfPermitFields = struct { token: [20]u8, amount: u256, deadline: u256, v: u8, r: [32]u8, s: [32]u8 };
+
+fn parseSelfPermitFields(data: []const u8, b: usize) ?SelfPermitFields {
+    const token = readAddressAt(data, b) orelse return null;
+    const amount = readU256At(data, b + 32) orelse return null;
+    const deadline = readU256At(data, b + 64) orelse return null;
+    const v = readUintAt(u8, data, b + 96) orelse return null;
+    const r = readWord(data, b + 128) orelse return null;
+    const s = readWord(data, b + 160) orelse return null;
+    return .{ .token = token, .amount = amount, .deadline = deadline, .v = v, .r = r, .s = s };
+}
+
+/// Decode a payment/permit helper call's arguments (`inner[4..]`). Null for
+/// an unrecognized or malformed selector.
+fn decodeMulticallPayment(sel: u32, inner: []const u8) ?Multicall.Payment {
+    const b: usize = 4;
+    return switch (sel) {
+        selU32(multicall_payment_selectors.unwrap_weth9) => blk: {
+            const amount_minimum = readU256At(inner, b) orelse return null;
+            break :blk .{ .unwrap_weth9 = .{ .amount_minimum = amount_minimum, .recipient = null } };
+        },
+        selU32(multicall_payment_selectors.unwrap_weth9_recipient) => blk: {
+            const amount_minimum = readU256At(inner, b) orelse return null;
+            const recipient = readAddressAt(inner, b + 32) orelse return null;
+            break :blk .{ .unwrap_weth9 = .{ .amount_minimum = amount_minimum, .recipient = recipient } };
+        },
+        selU32(multicall_payment_selectors.unwrap_weth9_with_fee) => blk: {
+            const amount_minimum = readU256At(inner, b) orelse return null;
+            const fee_bips = readU256At(inner, b + 32) orelse return null;
+            const fee_recipient = readAddressAt(inner, b + 64) orelse return null;
+            break :blk .{ .unwrap_weth9_with_fee = .{ .amount_minimum = amount_minimum, .recipient = null, .fee_bips = fee_bips, .fee_recipient = fee_recipient } };
+        },
+        selU32(multicall_payment_selectors.unwrap_weth9_with_fee_recipient) => blk: {
+            const amount_minimum = readU256At(inner, b) orelse return null;
+            const recipient = readAddressAt(inner, b + 32) orelse return null;
+            const fee_bips = readU256At(inner, b + 64) orelse return null;
+            const fee_recipient = readAddressAt(inner, b + 96) orelse return null;
+            break :blk .{ .unwrap_weth9_with_fee = .{ .amount_minimum = amount_minimum, .recipient = recipient, .fee_bips = fee_bips, .fee_recipient = fee_recipient } };
+        },
+        selU32(multicall_payment_selectors.sweep_token) => blk: {
+            const token = readAddressAt(inner, b) orelse return null;
+            const amount_minimum = readU256At(inner, b + 32) orelse return null;
+            break :blk .{ .sweep_token = .{ .token = token, .amount_minimum = amount_minimum, .recipient = null } };
+        },
+        selU32(multicall_payment_selectors.sweep_token_recipient) => blk: {
+            const token = readAddressAt(inner, b) orelse return null;
+            const amount_minimum = readU256At(inner, b + 32) orelse return null;
+            const recipient = readAddressAt(inner, b + 64) orelse return null;
+            break :blk .{ .sweep_token = .{ .token = token, .amount_minimum = amount_minimum, .recipient = recipient } };
+        },
+        selU32(multicall_payment_selectors.sweep_token_with_fee) => blk: {
+            const token = readAddressAt(inner, b) orelse return null;
+            const amount_minimum = readU256At(inner, b + 32) orelse return null;
+            const fee_bips = readU256At(inner, b + 64) orelse return null;
+            const fee_recipient = readAddressAt(inner, b + 96) orelse return null;
+            break :blk .{ .sweep_token_with_fee = .{ .token = token, .amount_minimum = amount_minimum, .recipient = null, .fee_bips = fee_bips, .fee_recipient = fee_recipient } };
+        },
+        selU32(multicall_payment_selectors.sweep_token_with_fee_recipient) => blk: {
+            const token = readAddressAt(inner, b) orelse return null;
+            const amount_minimum = readU256At(inner, b + 32) orelse return null;
+            const recipient = readAddressAt(inner, b + 64) orelse return null;
+            const fee_bips = readU256At(inner, b + 96) orelse return null;
+            const fee_recipient = readAddressAt(inner, b + 128) orelse return null;
+            break :blk .{ .sweep_token_with_fee = .{ .token = token, .amount_minimum = amount_minimum, .recipient = recipient, .fee_bips = fee_bips, .fee_recipient = fee_recipient } };
+        },
+        selU32(multicall_payment_selectors.refund_eth) => .refund_eth,
+        selU32(multicall_payment_selectors.wrap_eth) => blk: {
+            const value = readU256At(inner, b) orelse return null;
+            break :blk .{ .wrap_eth = .{ .value = value } };
+        },
+        selU32(multicall_payment_selectors.pull) => blk: {
+            const token = readAddressAt(inner, b) orelse return null;
+            const value = readU256At(inner, b + 32) orelse return null;
+            break :blk .{ .pull = .{ .token = token, .value = value } };
+        },
+        selU32(multicall_payment_selectors.self_permit) => blk: {
+            const f = parseSelfPermitFields(inner, b) orelse return null;
+            break :blk .{ .self_permit = .{ .kind = .permit, .token = f.token, .amount = f.amount, .deadline = f.deadline, .v = f.v, .r = f.r, .s = f.s } };
+        },
+        selU32(multicall_payment_selectors.self_permit_if_necessary) => blk: {
+            const f = parseSelfPermitFields(inner, b) orelse return null;
+            break :blk .{ .self_permit = .{ .kind = .permit_if_necessary, .token = f.token, .amount = f.amount, .deadline = f.deadline, .v = f.v, .r = f.r, .s = f.s } };
+        },
+        selU32(multicall_payment_selectors.self_permit_allowed) => blk: {
+            const f = parseSelfPermitFields(inner, b) orelse return null;
+            break :blk .{ .self_permit = .{ .kind = .allowed, .token = f.token, .amount = f.amount, .deadline = f.deadline, .v = f.v, .r = f.r, .s = f.s } };
+        },
+        selU32(multicall_payment_selectors.self_permit_allowed_if_necessary) => blk: {
+            const f = parseSelfPermitFields(inner, b) orelse return null;
+            break :blk .{ .self_permit = .{ .kind = .allowed_if_necessary, .token = f.token, .amount = f.amount, .deadline = f.deadline, .v = f.v, .r = f.r, .s = f.s } };
+        },
+        else => null,
+    };
+}
+
+/// Decode one inner multicall call (`inner.len >= 4` already checked by the
+/// caller) under `router`'s rules: a swap (via `routers.isInnerSwapSelector`
+/// / `decodeInnerCall`), a typed payment/permit helper, or `.other`. Null
+/// means the call looked like a swap or payment but failed to parse.
+fn decodeMulticallInner(router: routers.Router, inner: []const u8) ?Multicall.Call {
+    const sel4 = inner[0..4].*;
+    const sel = readSelectorU32(inner);
+    if (routers.isInnerSwapSelector(router, sel4)) {
+        const decoded = routers.decodeInnerCall(router, inner) orelse return null;
+        return .{ .swap = decoded };
+    }
+    if (isMulticallPaymentSelector(sel)) {
+        const payment = decodeMulticallPayment(sel, inner) orelse return null;
+        return .{ .payment = payment };
+    }
+    return .{ .other = .{ .selector = sel4, .data = inner } };
+}
+
 /// Every inner call is validated eagerly: too short is fatal, a recognized
-/// swap selector must fully decode, and anything else (including a nested
-/// multicall or UR execute) is accepted as `.other` without recursing.
-fn parseMulticall(data: []const u8, args_base: usize, kind: MulticallKind) ?Multicall {
+/// swap or payment selector must fully decode, and anything else (including
+/// a nested multicall or UR execute) is accepted as `.other` without
+/// recursing.
+fn parseMulticall(data: []const u8, args_base: usize, kind: MulticallKind, router: routers.Router) ?Multicall {
     var deadline: ?u256 = null;
     var previous_blockhash: ?[32]u8 = null;
     var calls_offset_pos = args_base;
@@ -913,64 +1230,20 @@ fn parseMulticall(data: []const u8, args_base: usize, kind: MulticallKind) ?Mult
     while (i < calls.count) : (i += 1) {
         const inner = bytesAt(calls.head, 0, i * 32) orelse return null;
         if (inner.len < 4) return null;
-        const sel = readSelectorU32(inner);
-        if (isSwapSelector(sel)) {
-            _ = decodeDispatch(inner, false) orelse return null;
-        }
+        _ = decodeMulticallInner(router, inner) orelse return null;
     }
-    return .{ .deadline = deadline, .previous_blockhash = previous_blockhash, .calls = calls };
+    return .{ .deadline = deadline, .previous_blockhash = previous_blockhash, .calls = calls, .router = router };
 }
 
 // ============================================================================
 // Decoding: top-level dispatch
 // ============================================================================
 
-fn isBatchSelector(sel: u32) bool {
-    return sel == selU32(selectors.multicall) or
-        sel == selU32(selectors.multicall_deadline) or
-        sel == selU32(selectors.multicall_blockhash) or
-        sel == selU32(selectors.execute) or
-        sel == selU32(selectors.execute_deadline);
-}
-
-/// True for every selector `decodeDispatch` can turn into a swap `Decoded`
-/// (i.e. every case below except the two batch dispatchers). Used to decide
-/// whether a multicall inner call is a swap that must fully decode, or an
-/// opaque `.other` payload.
-fn isSwapSelector(sel: u32) bool {
-    return switch (sel) {
-        selU32(selectors.swap_exact_tokens_for_tokens),
-        selU32(selectors.swap_tokens_for_exact_tokens),
-        selU32(selectors.swap_exact_eth_for_tokens),
-        selU32(selectors.swap_tokens_for_exact_eth),
-        selU32(selectors.swap_exact_tokens_for_eth),
-        selU32(selectors.swap_eth_for_exact_tokens),
-        selU32(selectors.swap_exact_tokens_for_tokens_fot),
-        selU32(selectors.swap_exact_eth_for_tokens_fot),
-        selU32(selectors.swap_exact_tokens_for_eth_fot),
-        selU32(selectors.exact_input_single),
-        selU32(selectors.exact_input),
-        selU32(selectors.exact_output_single),
-        selU32(selectors.exact_output),
-        selU32(selectors.exact_input_single_02),
-        selU32(selectors.exact_input_02),
-        selU32(selectors.exact_output_single_02),
-        selU32(selectors.exact_output_02),
-        selU32(selectors.swap_exact_tokens_for_tokens_02),
-        selU32(selectors.swap_tokens_for_exact_tokens_02),
-        => true,
-        else => false,
-    };
-}
-
-/// Shared dispatch for `decode` and for multicall/UR-execute inner calls.
-/// `allow_batch = false` refuses the two batch selectors, which bounds
-/// recursion to depth 1 (a nested multicall or UR execute is never entered;
-/// callers treat that refusal as `.other`).
-fn decodeDispatch(data: []const u8, allow_batch: bool) ?Decoded {
+/// Shared dispatch for `decode` and `decodeWithUrDialect`. `ur_dialect`
+/// picks the command table for a Universal Router `execute` call.
+fn decodeDispatch(data: []const u8, ur_dialect: UrDialect) ?Decoded {
     if (data.len < 4) return null;
     const sel = readSelectorU32(data);
-    if (!allow_batch and isBatchSelector(sel)) return null;
     const args_base: usize = 4;
 
     return switch (sel) {
@@ -993,11 +1266,11 @@ fn decodeDispatch(data: []const u8, allow_batch: bool) ?Decoded {
         selU32(selectors.exact_input_02) => Decoded{ .v3_exact_input = parseV3ExactInput(data, false) orelse return null },
         selU32(selectors.exact_output) => Decoded{ .v3_exact_output = parseV3ExactOutput(data, true) orelse return null },
         selU32(selectors.exact_output_02) => Decoded{ .v3_exact_output = parseV3ExactOutput(data, false) orelse return null },
-        selU32(selectors.multicall) => Decoded{ .multicall = parseMulticall(data, args_base, .plain) orelse return null },
-        selU32(selectors.multicall_deadline) => Decoded{ .multicall = parseMulticall(data, args_base, .with_deadline) orelse return null },
-        selU32(selectors.multicall_blockhash) => Decoded{ .multicall = parseMulticall(data, args_base, .with_blockhash) orelse return null },
-        selU32(selectors.execute) => Decoded{ .universal_router_execute = parseUniversalRouterExecute(data, args_base, false) orelse return null },
-        selU32(selectors.execute_deadline) => Decoded{ .universal_router_execute = parseUniversalRouterExecute(data, args_base, true) orelse return null },
+        selU32(selectors.multicall) => Decoded{ .multicall = parseMulticall(data, args_base, .plain, .uniswap) orelse return null },
+        selU32(selectors.multicall_deadline) => Decoded{ .multicall = parseMulticall(data, args_base, .with_deadline, .uniswap) orelse return null },
+        selU32(selectors.multicall_blockhash) => Decoded{ .multicall = parseMulticall(data, args_base, .with_blockhash, .uniswap) orelse return null },
+        selU32(selectors.execute) => Decoded{ .universal_router_execute = parseUniversalRouterExecute(data, args_base, false, ur_dialect, false) orelse return null },
+        selU32(selectors.execute_deadline) => Decoded{ .universal_router_execute = parseUniversalRouterExecute(data, args_base, true, ur_dialect, false) orelse return null },
         else => null,
     };
 }
@@ -1005,8 +1278,15 @@ fn decodeDispatch(data: []const u8, allow_batch: bool) ?Decoded {
 /// Like `decode`, but Universal Router `execute` calldata is read with the
 /// given command table. `decode(data)` is `decodeWithUrDialect(data, .uniswap)`.
 pub fn decodeWithUrDialect(data: []const u8, dialect: UrDialect) ?Decoded {
-    _ = dialect;
-    return decode(data);
+    return decodeDispatch(data, dialect);
+}
+
+fn isBatchSelector(sel: u32) bool {
+    return sel == selU32(selectors.multicall) or
+        sel == selU32(selectors.multicall_deadline) or
+        sel == selU32(selectors.multicall_blockhash) or
+        sel == selU32(selectors.execute) or
+        sel == selU32(selectors.execute_deadline);
 }
 
 /// Decode a batch call (`multicall` or Universal Router `execute`) sent to
@@ -1014,9 +1294,27 @@ pub fn decodeWithUrDialect(data: []const u8, dialect: UrDialect) ?Decoded {
 /// its rules, and `execute` uses the router's `UrDialect`. Null for any other
 /// selector. Used by `decodeFor`.
 pub fn decodeBatchFor(router: Router, data: []const u8) ?Decoded {
-    _ = router;
-    _ = data;
-    return null;
+    if (data.len < 4) return null;
+    const sel = readSelectorU32(data);
+    if (!isBatchSelector(sel)) return null;
+    const args_base: usize = 4;
+
+    if (sel == selU32(selectors.multicall)) {
+        return Decoded{ .multicall = parseMulticall(data, args_base, .plain, router) orelse return null };
+    }
+    if (sel == selU32(selectors.multicall_deadline)) {
+        return Decoded{ .multicall = parseMulticall(data, args_base, .with_deadline, router) orelse return null };
+    }
+    if (sel == selU32(selectors.multicall_blockhash)) {
+        return Decoded{ .multicall = parseMulticall(data, args_base, .with_blockhash, router) orelse return null };
+    }
+    const dialect: UrDialect = switch (router) {
+        .uniswap_ur_v1 => .uniswap_v1,
+        .pancake_ur => .pancake,
+        else => .uniswap,
+    };
+    const has_deadline = sel == selU32(selectors.execute_deadline);
+    return Decoded{ .universal_router_execute = parseUniversalRouterExecute(data, args_base, has_deadline, dialect, false) orelse return null };
 }
 
 /// Router-aware decoding for routers whose selectors collide with Uniswap's
@@ -1030,5 +1328,5 @@ pub const routerAt = routers.routerAt;
 /// Decode router calldata. Returns null for unknown selectors and for any
 /// malformed or truncated input; never panics and never allocates.
 pub fn decode(data: []const u8) ?Decoded {
-    return decodeDispatch(data, true);
+    return decodeDispatch(data, .uniswap);
 }

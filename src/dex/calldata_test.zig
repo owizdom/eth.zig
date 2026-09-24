@@ -1824,7 +1824,7 @@ test "AT2/AT3: UR execute round trip - execute(bytes,bytes[],uint256), 5-field l
         c.command_types.sweep,
         c.command_types.transfer,
         c.command_types.pay_portion,
-        0x02 | c.command_types.flag_allow_revert,
+        0x0f | c.command_types.flag_allow_revert,
     };
 
     const inputs = [_]AV{
@@ -1944,7 +1944,7 @@ test "AT2/AT3: UR execute round trip - execute(bytes,bytes[],uint256), 5-field l
         .other => |p| p,
         else => return error.WrongVariant,
     };
-    try testing.expectEqual(@as(u8, 0x02), p9.command_type);
+    try testing.expectEqual(@as(u8, 0x0f), p9.command_type);
     try testing.expectEqualSlices(u8, &unknown_payload, p9.input);
 
     try testing.expectEqual(@as(?c.Command, null), it.next());
@@ -2935,7 +2935,7 @@ test "B3: uniswap_v1 dialect fixture - commands 0x0a,0x00 (typed permit2_permit 
         else => return error.WrongVariant,
     };
     try testing.expectEqualSlices(u8, &addr("0000000000000000000000000000000000000001"), &swap1.recipient);
-    try testing.expectEqual(@as(u256, 39062500000000000000), swap1.amount_in);
+    try testing.expectEqual(@as(u256, 10000000000000000000000), swap1.amount_in);
     try testing.expectEqual(@as(u256, 56458695), swap1.amount_out_min);
     try testing.expectEqual(@as(usize, 2), swap1.path.hops());
     try testing.expectEqualSlices(u8, &addr("340d2bde5eb28c1eed91b2f790723e3b160613b7"), &swap1.path.first());
