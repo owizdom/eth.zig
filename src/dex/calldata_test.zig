@@ -958,9 +958,8 @@ fn buildExactInputWithPathLen(allocator: std.mem.Allocator, path_len: usize) ![]
 
 test "AT4: V3Path - rejects malformed path lengths" {
     const allocator = testing.allocator;
-    // 20 + 23k for k=0,1,2 is 20, 43, 66; none of 0,20,42,44,66 fit that
-    // formula with k>=1 except by coincidence, so all five must be rejected.
-    const bad_lengths = [_]usize{ 0, 20, 42, 44, 66 };
+    // Valid lengths are 20 + 23k with k >= 1 (43, 66, 89, ...); none of these fit.
+    const bad_lengths = [_]usize{ 0, 20, 42, 44, 65, 67 };
     for (bad_lengths) |len| {
         const encoded = try buildExactInputWithPathLen(allocator, len);
         defer allocator.free(encoded);
