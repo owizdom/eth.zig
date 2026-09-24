@@ -360,14 +360,17 @@ pub const command_types = struct {
 /// Which command table a Universal Router deployment uses. The same command
 /// byte means different things on different deployments.
 pub const UrDialect = enum {
-    /// Uniswap UR with V4 (Commands.sol @ a9c574f): 0x10 V4_SWAP, 0x21
-    /// EXECUTE_SUB_PLAN. What `decode` assumes.
+    /// Uniswap UR with V4 (Commands.sol @ a9c574f): type mask 0x7f, 0x10
+    /// V4_SWAP, 0x21 EXECUTE_SUB_PLAN. What `decode` assumes.
     uniswap,
-    /// Pre-V4 Uniswap UR (e.g. 0x3fC91A3a…7FAD): 0x10 and above are NFT
-    /// commands, surfaced as `.other`.
+    /// Pre-V4 Uniswap UR (Commands.sol @ v1.6.0 41183d6, e.g. 0x3fC91A3a…7FAD):
+    /// type mask 0x3f, same 0x00-0x0e commands, 0x10-0x20 and 0x22 are NFT and
+    /// approval commands (`.other`), 0x21 EXECUTE_SUB_PLAN.
     uniswap_v1,
-    /// PancakeSwap UR: pre-V4 table plus 0x20 EXECUTE_SUB_PLAN and 0x22/0x23
-    /// stable swaps.
+    /// PancakeSwap UR on BSC: type mask 0x3f, same 0x00-0x0e commands, 0x22 /
+    /// 0x23 stable swaps (layout confirmed by BSC tx 0x6cf50c46…c803). 0x10
+    /// carries a PancakeSwap Infinity plan with its own pool key and is
+    /// `.other`, as is every other command.
     pancake,
 };
 
