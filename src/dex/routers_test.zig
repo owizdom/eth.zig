@@ -217,6 +217,10 @@ const F_PUR_10 = fixtureBytes("0x3593564c000000000000000000000000000000000000000
 // PancakeRouter classic V2, same ABI as UniswapV2Router02, via .uniswap
 // tx 0x3b2f773aceaa41f616663dac2517115c862c04a8ff8f49fa95cc37b40434ad7c block 123681831 chain bsc to 0x10ed43c718714eb63d5aa57b78b54704e256024e selector 0x38ed1739
 const F_PV2_38ED1739 = fixtureBytes("0x38ed173900000000000000000000000000000000000000000000000002dc91ceb8af8000000000000000000000000000000000000000000000094f886cbbd84e862c09fd00000000000000000000000000000000000000000000000000000000000000a00000000000000000000000000499971b6222e63461a9b487759e28032d47c670000000000000000000000000000000000000000000000000000000006ab495970000000000000000000000000000000000000000000000000000000000000002000000000000000000000000bb4cdb9cbd36b01bd1cbaebf2de08d9173bc095c0000000000000000000000005d6ad00dc264ee68654fd7bc5bc052ac4c150c16");
+// tx 0xa033d5d8c855c5d65544ab73a6f4b827b93e5675f151233b3dd5e2c3da8b0e09 block 508303683 chain arbitrum to 0xc873fecbd354f5a56e00e710b90ef4201db2448d selector 0xac3893ba
+const F_CAM2_AC3893BA = fixtureBytes("0xac3893ba000000000000000000000000000000000000000000000001158e460913d000000000000000000000000000000000000000000000000001a7eef61d0b1e927ad100000000000000000000000000000000000000000000000000000000000000c0000000000000000000000000d7865f9e837771304b8890e3cf76e5182639624b0000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000006ab489b0000000000000000000000000000000000000000000000000000000000000000200000000000000000000000080e0dfe47b2caa9c13915931d50347a1ef350912000000000000000000000000a4081cbcdd886ce0dae749d4b415c36319e25f82");
+// tx 0x4e0cba5e654861665dc37d9c54bf2bb8b38d126118b44439e4a2af6a324f1f59 block 123681507 chain bsc to 0x10ed43c718714eb63d5aa57b78b54704e256024e selector 0x4a25d94a
+const F_PV2_4A25D94A = fixtureBytes("0x4a25d94a00000000000000000000000000000000000000000000000001af5a4baafc4800000000000000000000000000000000000000000000000315957a8ff4613b4aef00000000000000000000000000000000000000000000000000000000000000a00000000000000000000000005fc238e827f729dd8572b52628bc60265f4fc0b6000000000000000000000000000000000000000000000000000000006ab493080000000000000000000000000000000000000000000000000000000000000002000000000000000000000000ab1449399d1f2551bda940384344284cc05c69d9000000000000000000000000bb4cdb9cbd36b01bd1cbaebf2de08d9173bc095c");
 
 // Velodrome V2 Router (Optimism), same ABI as Aerodrome, via .aerodrome
 // tx 0x961d37b886bf248d8da09d20d3d789938c85cdcd63f9c5184c1add1caec9bbed block 157309842 chain optimism to 0xa062ae8a9c5e11aaa026fc2670b0d65ccc8b2858 selector 0xcac88ea9
@@ -251,6 +255,8 @@ const all_router_fixtures = [_]RouterFixture{
     .{ .router = .pancake_ur, .data = &F_PUR_22080604 },
     .{ .router = .pancake_ur, .data = &F_PUR_10 },
     .{ .router = .uniswap, .data = &F_PV2_38ED1739 },
+    .{ .router = .camelot_v2, .data = &F_CAM2_AC3893BA },
+    .{ .router = .uniswap, .data = &F_PV2_4A25D94A },
     .{ .router = .aerodrome, .data = &F_VELO_CAC88EA9 },
 };
 
@@ -839,6 +845,43 @@ test "fixture: bsc_pancake_v2_0x38ed1739 swapExactTokensForTokens via .uniswap" 
     try testing.expectEqualSlices(u8, &addr("5d6ad00dc264ee68654fd7bc5bc052ac4c150c16"), &s.path.last());
     try testing.expectEqualSlices(u8, &addr("0499971b6222e63461a9b487759e28032d47c670"), &s.to);
     try testing.expectEqual(@as(?u256, 1790219671), s.deadline);
+}
+
+// Expected values: `cast calldata-decode "swapExactTokensForTokensSupportingFeeOnTransferTokens(uint256,uint256,address[],address,address,uint256)"`.
+test "fixture: arbitrum_camelot_v2_0xac3893ba swapExactTokensForTokensSupportingFeeOnTransferTokens via .camelot_v2" {
+    const decoded = r.decodeFor(.camelot_v2, &F_CAM2_AC3893BA);
+    try testing.expect(decoded != null);
+    const s = switch (decoded.?) {
+        .camelot_v2_swap_exact_tokens_for_tokens_fot => |v| v,
+        else => return error.WrongVariant,
+    };
+    try testing.expectEqual(@as(u256, 20000000000000000000), s.amount_in);
+    try testing.expectEqual(@as(u256, 7820191725338032765649), s.amount_out_min);
+    try testing.expectEqual(@as(usize, 2), s.path.len());
+    try testing.expectEqualSlices(u8, &addr("80e0dfe47b2caa9c13915931d50347a1ef350912"), &s.path.first());
+    try testing.expectEqualSlices(u8, &addr("a4081cbcdd886ce0dae749d4b415c36319e25f82"), &s.path.last());
+    try testing.expectEqualSlices(u8, &addr("d7865f9e837771304b8890e3cf76e5182639624b"), &s.to);
+    try testing.expectEqualSlices(u8, &addr("0000000000000000000000000000000000000000"), &s.referrer);
+    try testing.expectEqual(@as(u256, 1790216624), s.deadline);
+    // Uniswap has no such selector: the same bytes under `.uniswap` are null.
+    try testing.expectEqual(@as(?c.Decoded, null), r.decodeFor(.uniswap, &F_CAM2_AC3893BA));
+}
+
+// PancakeRouter shares UniswapV2Router02's ABI. Expected values:
+// `cast calldata-decode "swapTokensForExactETH(uint256,uint256,address[],address,uint256)"`.
+test "fixture: bsc_pancake_v2_0x4a25d94a swapTokensForExactETH via .uniswap" {
+    const decoded = r.decodeFor(.uniswap, &F_PV2_4A25D94A);
+    try testing.expect(decoded != null);
+    const s = switch (decoded.?) {
+        .v2_swap_tokens_for_exact_eth => |v| v,
+        else => return error.WrongVariant,
+    };
+    try testing.expectEqual(@as(u256, 121414996000000000), s.amount_out);
+    try testing.expectEqual(@as(u256, 14565252153895412255471), s.amount_in_max);
+    try testing.expectEqualSlices(u8, &addr("ab1449399d1f2551bda940384344284cc05c69d9"), &s.path.first());
+    try testing.expectEqualSlices(u8, &addr("bb4cdb9cbd36b01bd1cbaebf2de08d9173bc095c"), &s.path.last());
+    try testing.expectEqualSlices(u8, &addr("5fc238e827f729dd8572b52628bc60265f4fc0b6"), &s.to);
+    try testing.expectEqual(@as(?u256, 1790219016), s.deadline);
 }
 
 // ============================================================================
