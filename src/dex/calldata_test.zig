@@ -115,10 +115,12 @@ fn walkAddressPath(p: c.AddressPath) void {
     const n = p.len();
     var i: usize = 0;
     while (i < n) : (i += 1) _ = p.get(i);
-    if (n > 0) {
-        _ = p.first();
-        _ = p.last();
-    }
+    // R1: every address[] swap path decode() returns has at least 2
+    // elements, so first()/last() are valid on any non-null decode. No
+    // `n > 0` guard: calling them unconditionally is exactly the contract
+    // this walker is meant to exercise.
+    _ = p.first();
+    _ = p.last();
 }
 
 fn walkV3Path(p: c.V3Path) void {
@@ -163,11 +165,11 @@ fn walkDecoded(d: c.Decoded) void {
         .v2_swap_exact_tokens_for_eth,
         .v2_swap_exact_tokens_for_tokens_fot,
         .v2_swap_exact_tokens_for_eth_fot,
-        .v2_router02_swap_exact_tokens_for_tokens,
+        .swap_router02_swap_exact_tokens_for_tokens,
         => |s| walkAddressPath(s.path),
         .v2_swap_tokens_for_exact_tokens,
         .v2_swap_tokens_for_exact_eth,
-        .v2_router02_swap_tokens_for_exact_tokens,
+        .swap_router02_swap_tokens_for_exact_tokens,
         => |s| walkAddressPath(s.path),
         .v2_swap_exact_eth_for_tokens, .v2_swap_exact_eth_for_tokens_fot => |s| walkAddressPath(s.path),
         .v2_swap_eth_for_exact_tokens => |s| walkAddressPath(s.path),
@@ -267,7 +269,7 @@ const F_UR_05 = fixtureBytes("0x3593564c0000000000000000000000000000000000000000
 const F_UR_0A08 = fixtureBytes("0x3593564c000000000000000000000000000000000000000000000000000000000000006000000000000000000000000000000000000000000000000000000000000000a0000000000000000000000000000000000000000000000000000000006ab473ba00000000000000000000000000000000000000000000000000000000000000020a080000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000002000000000000000000000000000000000000000000000000000000000000004000000000000000000000000000000000000000000000000000000000000001c000000000000000000000000000000000000000000000000000000000000001600000000000000000000000004af63cb879810c2aedfc77afba0977d18b3d62b4000000000000000000000000000000000000000000008e4d46b774dc00edf9f8000000000000000000000000000000000000000000000000000000006adbff8f000000000000000000000000000000000000000000000000000000000000000000000000000000000000000066a9893cc07d91d95644aedd05d03f95e1dba8af000000000000000000000000000000000000000000000000000000006adbff8f00000000000000000000000000000000000000000000000000000000000000e000000000000000000000000000000000000000000000000000000000000000411ad4d4957144e652f4f99869b65f5ef698a2d42c9466ad3d0743a98a43cba3104294241be94080ded4c4bda831f46217dfbd79090fe4fb59526c7e56d3b2fa4e1b000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000100000000000000000000000000980cba2583e211b5e96623d8151de3a3523dc125000000000000000000000000000000000000000000008e4d46b774dc00edf9f800000000000000000000000000000000000000000000000002bff0cc2252adaa00000000000000000000000000000000000000000000000000000000000000a0000000000000000000000000000000000000000000000000000000000000000100000000000000000000000000000000000000000000000000000000000000020000000000000000000000004af63cb879810c2aedfc77afba0977d18b3d62b4000000000000000000000000c02aaa39b223fe8d0a0e5c4f27ead9083c756cc2");
 
 // tx 0x3ea498afa37677e918a4e86e741e86d6d9824704b21161136a90e91d876e8629 block 26043844 to 0x66a9893cc07d91d95644aedd05d03f95e1dba8af selector 0x3593564c (single command 0x10: V4_SWAP -> .other)
-const F_UR_10 = fixtureBytes("0x3593564c000000000000000000000000000000000000000000000000000000000000006000000000000000000000000000000000000000000000000000000000000000a0000000000000000000000000000000000000000000000000000000006ab4754b000000000000000000000000000000000000000000000000000000000000000110000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000001000000000000000000000000000000000000000000000000000000000000002000000000000000000000000000000000000000000000000000000000000003e0000000000000000000000000000000000000000000000000000000000000004000000000000000000000000000000000000000000000000000000000000000800000000000000000000000000000000000000000000000000000000000000003060c0e000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000030000000000000000000000000000000000000000000000000000000000000060000000000000000000000000000000000000000000000000000000000000026000000000000000000000000000000000000000000000000000000000000002c000000000000000000000000000000000000000000000000000000000000001e00000000000000000000000000000000000000000000000000000000000000020000000000000000000000000888888888887715fb9d9f84175af9e6cce46807e000000000000000000000000dac17f958d2ee523a2206206994597c13d831ec70000000000000000000000000000000000000000000000000000000000000bb8000000000000000000000000000000000000000000000000000000000000003c000000000000000000000000d33398d46cb5749c7319ae1fabc498cdeb0f0fc000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000002ce2dea0000000000000000000000000000000000000000000000000000000bf7ebc94d000000000000000000000000000000000000000000000000000000000000012000000000000000000000000000000000000000000000000000000000000000616c1ba8962ca527ed8f895ba1574483ff8323f54398da1bcdaa5e5f5cafd60e264ad13a2ab9bac30cdfe45f99bce199fb92abf255863fdecc45608b929eaa122c1bffffffffffffffffffffffffffffffffffffffffffffffffffffff172b5af000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000040000000000000000000000000dac17f958d2ee523a2206206994597c13d831ec70000000000000000000000000000000000000000000000000000000002ce2dea0000000000000000000000000000000000000000000000000000000000000060000000000000000000000000888888888887715fb9d9f84175af9e6cce46807e000000000000000000000000d105b3cd6f73cc4acd31ef93b23386df1398480b0000000000000000000000000000000000000000000000000000000000000000");
+const F_UR_10 = fixtureBytes("0x3593564c000000000000000000000000000000000000000000000000000000000000006000000000000000000000000000000000000000000000000000000000000000a0000000000000000000000000000000000000000000000000000000006ab4754b000000000000000000000000000000000000000000000000000000000000000110000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000001000000000000000000000000000000000000000000000000000000000000002000000000000000000000000000000000000000000000000000000000000003e0000000000000000000000000000000000000000000000000000000000000004000000000000000000000000000000000000000000000000000000000000000800000000000000000000000000000000000000000000000000000000000000003060c0e000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000030000000000000000000000000000000000000000000000000000000000000060000000000000000000000000000000000000000000000000000000000000026000000000000000000000000000000000000000000000000000000000000002c000000000000000000000000000000000000000000000000000000000000001e00000000000000000000000000000000000000000000000000000000000000020000000000000000000000000888888888887715fb9d9f84175af9e6cce46807e000000000000000000000000dac17f958d2ee523a2206206994597c13d831ec70000000000000000000000000000000000000000000000000000000000000bb8000000000000000000000000000000000000000000000000000000000000003c000000000000000000000000d33398d46cb5749c7319ae1fabc498cdeb0f0fc000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000002ce2dea0000000000000000000000000000000000000000000000000000000bf7ebc94d000000000000000000000000000000000000000000000000000000000000012000000000000000000000000000000000000000000000000000000000000000616c1ba8962ca527ed8f895ba1574483ff8323f54398da1bcdaa5e5f5cafd60e264ad13a2ab9bac30cdfe45f99bce199fb92abf255863fdecc45608b929eaa122c1bffffffffffffffffffffffffffffffffffffffffffffffffffffff172b5af000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000040000000000000000000000000dac17f958d2ee523a2206206994597c13d831ec70000000000000000000000000000000000000000000000000000000002ce2dea0000000000000000000000000000000000000000000000000000000000000060000000000000000000000000888888888887715fb9d9f84175af9e6cce46807e000000000000000000000000d105b3cd6f73cc4acd31ef93b23386df1398480b000000000000000000000000000000000000000000000000000000000000000078");
 
 // tx 0x2afb4065d5f84819b00bf95dd52ba75eeb3aaf94c40675ff665b0bb2c52b9cdf block 26043714 to 0x66a9893cc07d91d95644aedd05d03f95e1dba8af selector 0x3593564c (6-field layout: 0x08,0x06,0x0c)
 const F_UR_08060C_6FIELD = fixtureBytes("0x3593564c000000000000000000000000000000000000000000000000000000000000006000000000000000000000000000000000000000000000000000000000000000a0000000000000000000000000000000000000000000000000000000006ab46de7000000000000000000000000000000000000000000000000000000000000000308060c00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000003000000000000000000000000000000000000000000000000000000000000006000000000000000000000000000000000000000000000000000000000000001c00000000000000000000000000000000000000000000000000000000000000240000000000000000000000000000000000000000000000000000000000000014000000000000000000000000000000000000000000000000000000000000000020000000000000000000000000000000000000000000002f90d7231177e13e00e000000000000000000000000000000000000000000000000001d2df327b908f600000000000000000000000000000000000000000000000000000000000000c00000000000000000000000000000000000000000000000000000000000000001000000000000000000000000000000000000000000000000000000000000012000000000000000000000000000000000000000000000000000000000000000020000000000000000000000007368563b2395e96fc74282c6987eea844f4f7132000000000000000000000000c02aaa39b223fe8d0a0e5c4f27ead9083c756cc200000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000060000000000000000000000000c02aaa39b223fe8d0a0e5c4f27ead9083c756cc2000000000000000000000000c2f08ddf35ca84819c8f5d33de6e0edbc87c46340000000000000000000000000000000000000000000000000000000000000064000000000000000000000000000000000000000000000000000000000000004000000000000000000000000084e622873636c727a38d73496dea4f065cc6741e000000000000000000000000000000000000000000000000001ce3401567d31c");
@@ -590,7 +592,7 @@ test "AT12: round trip - SwapRouter02 V2-style swapExactTokensForTokens (deadlin
     const decoded = c.decode(encoded);
     try testing.expect(decoded != null);
     const swap = switch (decoded.?) {
-        .v2_router02_swap_exact_tokens_for_tokens => |s| s,
+        .swap_router02_swap_exact_tokens_for_tokens => |s| s,
         else => return error.WrongVariant,
     };
     try testing.expectEqual(@as(u256, 200), swap.amount_in);
@@ -613,7 +615,7 @@ test "AT12: round trip - SwapRouter02 V2-style swapTokensForExactTokens (deadlin
     const decoded = c.decode(encoded);
     try testing.expect(decoded != null);
     const swap = switch (decoded.?) {
-        .v2_router02_swap_tokens_for_exact_tokens => |s| s,
+        .swap_router02_swap_tokens_for_exact_tokens => |s| s,
         else => return error.WrongVariant,
     };
     try testing.expectEqual(@as(u256, 300), swap.amount_out);
@@ -968,6 +970,94 @@ test "AT4: V3Path - rejects malformed path lengths" {
 }
 
 // ============================================================================
+// R1 (spec section 9, amendment H1): every address[] swap path must have at
+// least 2 elements, as in UniswapV2Library.sol:63,74 and UR
+// V2SwapRouter.sol:75,112. Shorter paths make `decode` null.
+// ============================================================================
+
+test "R1: V2Router02 swapExactTokensForTokens - path length 0 and 1 null, length 2 decodes" {
+    const allocator = testing.allocator;
+    var path_buf: [2]AV = undefined;
+    const lengths = [_]usize{ 0, 1, 2 };
+    for (lengths) |n| {
+        const values = [_]AV{
+            .{ .uint256 = 1000 },
+            .{ .uint256 = 900 },
+            .{ .array = rtPathValues(RT_PATH_A[0..n], &path_buf) },
+            .{ .address = RT_TO },
+            .{ .uint256 = 1234567890 },
+        };
+        const encoded = try abi_encode.encodeFunctionCall(allocator, c.selectors.swap_exact_tokens_for_tokens, &values);
+        defer allocator.free(encoded);
+        const decoded = c.decode(encoded);
+        if (n < 2) {
+            try testing.expectEqual(@as(?c.Decoded, null), decoded);
+        } else {
+            try testing.expect(decoded != null);
+        }
+    }
+}
+
+test "R1: SwapRouter02 V2-style swapExactTokensForTokens (0x472b43f3) - path length 0 and 1 null, length 2 decodes" {
+    const allocator = testing.allocator;
+    var path_buf: [2]AV = undefined;
+    const lengths = [_]usize{ 0, 1, 2 };
+    for (lengths) |n| {
+        const values = [_]AV{
+            .{ .uint256 = 200 },
+            .{ .uint256 = 190 },
+            .{ .array = rtPathValues(RT_PATH_A[0..n], &path_buf) },
+            .{ .address = RT_TO },
+        };
+        const encoded = try abi_encode.encodeFunctionCall(allocator, c.selectors.swap_exact_tokens_for_tokens_02, &values);
+        defer allocator.free(encoded);
+        const decoded = c.decode(encoded);
+        if (n < 2) {
+            try testing.expectEqual(@as(?c.Decoded, null), decoded);
+        } else {
+            try testing.expect(decoded != null);
+            switch (decoded.?) {
+                .swap_router02_swap_exact_tokens_for_tokens => {},
+                else => return error.WrongVariant,
+            }
+        }
+    }
+}
+
+test "R1: UR V2_SWAP_EXACT_IN command - path length 0 and 1 null, length 2 decodes" {
+    const allocator = testing.allocator;
+    var path_buf: [2]AV = undefined;
+    const lengths = [_]usize{ 0, 1, 2 };
+    for (lengths) |n| {
+        const cmd_v2_in = [_]AV{
+            .{ .address = RT_RECIPIENT },
+            .{ .uint256 = 200 },
+            .{ .uint256 = 190 },
+            .{ .array = rtPathValues(RT_PATH_A[0..n], &path_buf) },
+            .{ .boolean = true },
+        };
+        const in_v2_in = try abi_encode.encodeValues(allocator, &cmd_v2_in);
+        defer allocator.free(in_v2_in);
+
+        const commands = [_]u8{c.command_types.v2_swap_exact_in};
+        const inputs = [_]AV{.{ .bytes = in_v2_in }};
+        const values = [_]AV{
+            .{ .bytes = &commands },
+            .{ .array = &inputs },
+            .{ .uint256 = 1790300000 },
+        };
+        const encoded = try abi_encode.encodeFunctionCall(allocator, c.selectors.execute_deadline, &values);
+        defer allocator.free(encoded);
+        const decoded = c.decode(encoded);
+        if (n < 2) {
+            try testing.expectEqual(@as(?c.Decoded, null), decoded);
+        } else {
+            try testing.expect(decoded != null);
+        }
+    }
+}
+
+// ============================================================================
 // AT5/AT6/AT12: mainnet fixtures (V2Router02, SwapRouter, SwapRouter02)
 // ============================================================================
 
@@ -1075,7 +1165,7 @@ test "AT12: fixture - SwapRouter02 V2-style swapExactTokensForTokens (0x472b43f3
     const decoded = c.decode(&F_V2STYLE_472B43F3);
     try testing.expect(decoded != null);
     const swap = switch (decoded.?) {
-        .v2_router02_swap_exact_tokens_for_tokens => |s| s,
+        .swap_router02_swap_exact_tokens_for_tokens => |s| s,
         else => return error.WrongVariant,
     };
     try testing.expectEqual(@as(u256, 119124599131975), swap.amount_in);
@@ -1387,6 +1477,118 @@ test "AT11: multicall - a malformed inner swap makes the whole decode null" {
     defer allocator.free(encoded);
 
     try testing.expectEqual(@as(?c.Decoded, null), c.decode(encoded));
+}
+
+// ============================================================================
+// R2 (spec section 9, amendment M2): the elements of every `bytes[]`
+// (multicall calls, UR inputs) must be canonical -- each element's offset
+// must be at or past the end of the previous element's padded data. Aliased
+// or overlapping elements make `decode` null; solc and ethers never produce
+// them.
+// ============================================================================
+
+test "R2: multicall(bytes[]) - two offsets aliasing the same inner element makes decode null" {
+    const allocator = testing.allocator;
+    var b = Builder.init(allocator);
+    defer b.deinit();
+    try b.sel4(c.selectors.multicall);
+    try b.w(32); // offset to the bytes[] array
+    try b.w(2); // calls.length = 2
+    try b.w(64); // calls[0] offset (relative to the head base): right after the 2 head words
+    try b.w(64); // calls[1] offset: the SAME value -- aliases calls[0]'s exact element
+    // The single inner element both offsets point at: a 4-byte selector
+    // (unwrapWETH9), not a swap, so it decodes as `.other` with no further
+    // structural requirements on its content.
+    try b.w(4); // inner element length = 4
+    const inner_sel = [_]u8{ 0x49, 0x40, 0x4b, 0x7c };
+    try b.raw(&inner_sel);
+    try b.padZero(28); // pad the 4-byte content to a full word
+    const data = try b.ownedSlice();
+    defer allocator.free(data);
+    try testing.expectEqual(@as(?c.Decoded, null), c.decode(data));
+}
+
+test "R2: UR execute - inputs[1] offset overlapping inputs[0]'s padded data makes decode null" {
+    const allocator = testing.allocator;
+    var b = Builder.init(allocator);
+    defer b.deinit();
+    try b.sel4(c.selectors.execute_deadline);
+    try b.w(0x60); // commands offset
+    try b.w(0xa0); // inputs offset
+    try b.w(999); // deadline
+    try b.w(2); // commands.length = 2
+    try b.wRaw(blk: {
+        var word: [32]u8 = @splat(0);
+        word[0] = 0x02; // unknown command type -> .other (no content constraints)
+        word[1] = 0x03; // unknown command type -> .other
+        break :blk word;
+    });
+    try b.w(2); // inputs.length = 2
+    try b.w(0x40); // inputs[0] offset (relative to the head base): right after the 2 head words -- canonical
+    // inputs[1] offset: only one word past inputs[0]'s offset. inputs[0] is
+    // declared length 64 (header 32B + content 64B = 96B padded), so the
+    // canonical next offset would be >= 0x40 + 0x60 = 0xa0. 0x60 lands
+    // strictly inside inputs[0]'s own padded span: an overlap, not merely an
+    // alias of the whole element.
+    try b.w(0x60);
+    // inputs[0]: length 64, content = [word_a, word_b]. Read via the
+    // overlapping offset above, word_a doubles as inputs[1]'s own length
+    // header (= 32) and word_b as its 32-byte content -- both entirely
+    // inside inputs[0]'s own 96-byte span, so this is in-bounds and
+    // well-formed under the pre-R2 rules. Only the offset-canonicality check
+    // can reject it.
+    try b.w(64); // inputs[0].length
+    try b.w(32); // word_a
+    try b.wRaw(@as([32]u8, @splat(0xBB))); // word_b
+    const data = try b.ownedSlice();
+    defer allocator.free(data);
+    try testing.expectEqual(@as(?c.Decoded, null), c.decode(data));
+}
+
+test "R2: timing guard - multicall(bytes[]) with 1,900 aliased offsets into one 1,900-address swap path decodes to null" {
+    const allocator = testing.allocator;
+
+    // One valid swapExactTokensForTokens call with a 1,900-address path
+    // (~61 KB): the reviewer's attack payload.
+    const n_addrs: usize = 1900;
+    const path_values = try allocator.alloc(AV, n_addrs);
+    defer allocator.free(path_values);
+    for (path_values, 0..) |*v, i| v.* = .{ .address = RT_PATH_A[i % 2] };
+
+    const inner_values = [_]AV{
+        .{ .uint256 = 1000 },
+        .{ .uint256 = 900 },
+        .{ .array = path_values },
+        .{ .address = RT_TO },
+        .{ .uint256 = 1234567890 },
+    };
+    const inner_call = try abi_encode.encodeFunctionCall(allocator, c.selectors.swap_exact_tokens_for_tokens, &inner_values);
+    defer allocator.free(inner_call);
+
+    // 1,900 offsets in the outer bytes[] head, all pointing at the single
+    // inner call above (about 122 KB total, matching the reviewer's crafted
+    // attack). Without the R2 canonicality rule, a naive decoder
+    // re-validates the aliased element once per offset -- O(offsets * path
+    // length) instead of linear. R2 rejects it by construction (every
+    // offset after the first violates canonicality), so this must stay
+    // fast regardless of which validation order an implementation picks.
+    const n_offsets: usize = 1900;
+    var b = Builder.init(allocator);
+    defer b.deinit();
+    try b.sel4(c.selectors.multicall);
+    try b.w(32); // offset to the bytes[] array
+    try b.w(n_offsets); // calls.length
+    const shared_offset: usize = n_offsets * 32; // right after the head words
+    var i: usize = 0;
+    while (i < n_offsets) : (i += 1) try b.w(shared_offset);
+    try b.w(inner_call.len);
+    try b.raw(inner_call);
+    const inner_pad = (32 - (inner_call.len % 32)) % 32;
+    try b.padZero(inner_pad);
+
+    const data = try b.ownedSlice();
+    defer allocator.free(data);
+    try testing.expectEqual(@as(?c.Decoded, null), c.decode(data));
 }
 
 // ============================================================================
@@ -1859,6 +2061,8 @@ test "AT6: UR fixture - 6-field layout commands 0x08,0x06,0x0c (path offset 0xc0
         .v2_swap_exact_in => |p| p,
         else => return error.WrongVariant,
     };
+    // 0x...02 is ADDRESS_THIS (Dispatcher.map): the router substitutes its
+    // own address for the recipient, per Dispatcher.sol:332-340 (R4).
     try testing.expectEqualSlices(u8, &addr("0000000000000000000000000000000000000002"), &swap.recipient);
     try testing.expectEqual(@as(u256, 14038941130939776098318), swap.amount_in);
     try testing.expectEqual(@as(u256, 8213296691349750), swap.amount_out_min);
@@ -2024,6 +2228,73 @@ test "AT8: attack - dirty address padding" {
     try b.w(2); // path length
     try b.wAddr(RT_PATH_A[0]);
     try b.wAddr(RT_PATH_A[1]);
+    const data = try b.ownedSlice();
+    defer allocator.free(data);
+    try testing.expectEqual(@as(?c.Decoded, null), c.decode(data));
+}
+
+test "AT8: attack - dirty high bytes on a non-first address[] path element (V2Router02)" {
+    const allocator = testing.allocator;
+    var b = Builder.init(allocator);
+    defer b.deinit();
+    try b.sel4(c.selectors.swap_exact_tokens_for_tokens);
+    try b.w(1000); // amount_in
+    try b.w(900); // amount_out_min
+    try b.w(0xa0); // path offset
+    try b.wAddr(RT_TO);
+    try b.w(123); // deadline
+    try b.w(2); // path length
+    try b.wAddr(RT_PATH_A[0]); // path[0]: clean padding
+    // path[1] (not the first element): real address in the low 20 bytes,
+    // but a nonzero byte in the padding region.
+    var dirty_path1: [32]u8 = @splat(0);
+    dirty_path1[5] = 0x01; // dirty high padding byte
+    @memcpy(dirty_path1[12..32], &RT_PATH_A[1]);
+    try b.wRaw(dirty_path1);
+    const data = try b.ownedSlice();
+    defer allocator.free(data);
+    try testing.expectEqual(@as(?c.Decoded, null), c.decode(data));
+}
+
+test "AT8: attack - dirty high bytes on a non-first address[] path element (UR V2_SWAP_EXACT_IN)" {
+    const allocator = testing.allocator;
+    var b = Builder.init(allocator);
+    defer b.deinit();
+    try b.sel4(c.selectors.execute_deadline);
+    try b.w(0x60); // commands offset
+    try b.w(0xa0); // inputs offset
+    try b.w(999); // deadline
+    try b.w(1); // commands.length
+    try b.wRaw(blk: {
+        var word: [32]u8 = @splat(0);
+        word[0] = c.command_types.v2_swap_exact_in;
+        break :blk word;
+    });
+    try b.w(1); // inputs.length
+    try b.w(0x20); // inputs[0] offset
+
+    var inner = Builder.init(allocator);
+    defer inner.deinit();
+    try inner.wAddr(RT_RECIPIENT);
+    try inner.w(200);
+    try inner.w(190);
+    try inner.w(0xa0); // path offset
+    try inner.w(1); // bool word: payer_is_user = true
+    try inner.w(2); // path length
+    try inner.wAddr(RT_PATH_A[0]); // path[0]: clean padding
+    // path[1] (not the first element): real address in the low 20 bytes,
+    // but a nonzero byte in the padding region.
+    var dirty_path1: [32]u8 = @splat(0);
+    dirty_path1[7] = 0x01; // dirty high padding byte
+    @memcpy(dirty_path1[12..32], &RT_PATH_A[1]);
+    try inner.wRaw(dirty_path1);
+    const inner_bytes = try inner.ownedSlice();
+    defer allocator.free(inner_bytes);
+    try b.w(inner_bytes.len);
+    try b.raw(inner_bytes);
+    const pad = (32 - (inner_bytes.len % 32)) % 32;
+    try b.padZero(pad);
+
     const data = try b.ownedSlice();
     defer allocator.free(data);
     try testing.expectEqual(@as(?c.Decoded, null), c.decode(data));
