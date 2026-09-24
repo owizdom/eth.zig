@@ -101,7 +101,7 @@ Exact-output V3 paths are encoded in reverse. For `v3_exact_output`, `path.first
 
 ### SwapRouter02: Multicall
 
-Most SwapRouter02 traffic wraps its swap in `multicall`. Inner swaps decode to the same `Decoded` union. Other inner calls, such as `selfPermit` or `unwrapWETH9`, come back raw.
+Most SwapRouter02 traffic wraps its swap in `multicall`. Inner swaps decode to the same `Decoded` union. The router's helper calls (`unwrapWETH9`, `sweepToken`, `refundETH`, `wrapETH`, `pull` and the four `selfPermit` variants) decode to `.payment`. Anything else comes back raw as `.other`.
 
 ```zig
 const decoded = eth.dex.decode(tx.data) orelse return;
@@ -109,6 +109,7 @@ if (decoded == .multicall) {
     var it = decoded.multicall.iterator();
     while (it.next()) |call| switch (call) {
         .swap => |inner| std.debug.print("swap: {s}\n", .{@tagName(inner)}),
+        .payment => |p| std.debug.print("payment: {s}\n", .{@tagName(p)}),
         .other => |raw| std.debug.print("call {x}, {d} bytes\n", .{ raw.selector, raw.data.len }),
     };
 }
@@ -116,7 +117,7 @@ if (decoded == .multicall) {
 
 ### Universal Router: Commands
 
-Each command carries its raw byte, the `allow_revert` flag, and a typed payload. Command types without a typed payload, such as `V4_SWAP` and the Permit2 commands, arrive as `.other` with their raw input.
+Each command carries its raw byte, the `allow_revert` flag, and a typed payload. Typed commands cover V2 and V3 swaps, `V4_SWAP` plans, the Permit2 commands, `WRAP_ETH`, `UNWRAP_WETH`, `SWEEP`, `TRANSFER`, `PAY_PORTION`, `BALANCE_CHECK_ERC20` and `EXECUTE_SUB_PLAN`. Other command types arrive as `.other` with their raw input.
 
 ```zig
 const decoded = eth.dex.decode(tx.data) orelse return;
@@ -125,18 +126,60 @@ if (decoded == .universal_router_execute) {
     while (it.next()) |cmd| switch (cmd.payload) {
         .v3_swap_exact_in => |swap| std.debug.print("v3 in={d} hops={d}\n", .{ swap.amount_in, swap.path.hops() }),
         .v2_swap_exact_in => |swap| std.debug.print("v2 in={d} len={d}\n", .{ swap.amount_in, swap.path.len() }),
-        .wrap_eth => |wrap| std.debug.print("wrap {d}\n", .{wrap.amount}),
+        .permit2_permit => |permit| std.debug.print("permit {x} to {x}\n", .{ permit.details.token, permit.spender }),
+        .v4_swap => |plan| {
+            var actions = plan.iterator();
+            while (actions.next()) |action| switch (action.payload) {
+                .swap_exact_in_single => |swap| std.debug.print("v4 in={d} fee={d}\n", .{ swap.amount_in, swap.pool_key.fee }),
+                else => std.debug.print("v4 action 0x{x:0>2}\n", .{action.raw}),
+            };
+        },
         .other => |raw| std.debug.print("type 0x{x:0>2} revert_ok={} {d} bytes\n", .{ raw.command_type, cmd.allow_revert, raw.input.len }),
         else => {},
     };
 }
 ```
 
+The command type is the command byte masked with `0x3f`, as in the deployed router's bytecode. Recipients `0x0…01` and `0x0…02` are the router's sentinels for `msg.sender` and the router itself; they are returned raw.
+
+## Other Routers
+
+`decode` assumes Uniswap's routers. Some routers reuse Uniswap's selectors with a different meaning. Slipstream's `exactInput` path carries tick spacing where Uniswap's carries a fee, and Camelot V3's path has no fee bytes at all. Use `routerAt` to identify the router from the transaction's chain and `to` address, then `decodeFor` to decode with its rules.
+
+```zig
+const deployment = eth.dex.routerAt(chain_id, to) orelse return;
+const decoded = eth.dex.decodeFor(deployment.router, tx.data) orelse return;
+switch (decoded) {
+    .slipstream_exact_input => |swap| {
+        for (0..swap.path.hops()) |i| {
+            const hop = swap.path.hop(i);
+            std.debug.print("{x} -> {x} tick_spacing={d}\n", .{ hop.token_a, hop.token_b, hop.tickSpacing() });
+        }
+    },
+    .aerodrome_swap_exact_tokens_for_tokens => |swap| std.debug.print("routes={d} in={d}\n", .{ swap.routes.len(), swap.amount_in }),
+    .camelot_v3_exact_input => |swap| std.debug.print("tokens={d} in={d}\n", .{ swap.path.len(), swap.amount_in }),
+    else => std.debug.print("{s} {s}\n", .{ @tagName(deployment.protocol), @tagName(decoded) }),
+}
+```
+
+| Router | Chains | Decoded as |
+|--------|--------|------------|
+| Uniswap V2Router02, SwapRouter, SwapRouter02, Universal Router | Ethereum | `.uniswap` (same as `decode`) |
+| Uniswap Universal Router v1 (pre-V4) | Ethereum | `.uniswap_ur_v1` |
+| SushiSwap V2 and V3, PancakeSwap V2 and V3 | several | `.uniswap` (same ABI) |
+| PancakeSwap SmartRouter | BSC, Ethereum | `.pancake_smart_router` (adds stable swaps) |
+| PancakeSwap Universal Router | BSC | `.pancake_ur` (adds stable-swap commands) |
+| Aerodrome Router, Velodrome V2 Router | Base, Optimism | `.aerodrome` |
+| Aerodrome and Velodrome Slipstream SwapRouter | Base, Optimism | `.slipstream` |
+| Camelot V2 Router and V3 SwapRouter | Arbitrum | `.camelot_v2`, `.camelot_v3` |
+
+`routerAt` knows 24 deployments, each checked to have code on its chain. It returns null for any other address.
+
 ## Not Covered
 
-The decoder does not handle:
-
-- V4 swap action plans or nested commands in Universal Router.
-- Permit2 signatures and permit payloads (not part of swap calldata).
-- Inner calls within `multicall` that are not recognized swaps (returned as `.other`).
-- DEX routers beyond V2 forks that share the Uniswap ABI, such as 1inch or curve routers.
+- PancakeSwap Infinity plans (Pancake Universal Router command `0x10`). They use their own pool key and arrive as `.other`.
+- SushiSwap RouteProcessor and aggregator routers such as 1inch.
+- The Aerodrome/Velodrome Universal Router, whose deployed command table could not be verified.
+- Universal Router position-manager and NFT commands, which arrive as `.other`.
+- `decode` reads calldata for Uniswap's current routers. For a pre-V4 Universal Router, whose command `0x10` is an NFT command, use `decodeFor(.uniswap_ur_v1, data)`.
+- Validation is strict ABI. A few encodings a router would still execute, such as dirty padding bits, decode to null.
