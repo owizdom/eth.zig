@@ -31,11 +31,21 @@
 //!   accessor and iterator below is infallible.
 //! - Selectors are comptime keccak constants; dispatch is a `switch` on the
 //!   first four bytes.
+//! - Decoding is linear in `data.len`; non-canonical, aliased `bytes[]`
+//!   encodings (multicall calls, UR inputs) are rejected.
 //!
 //! ## Scope
 //! `decode` looks at calldata only; checking `tx.to` against a router address
 //! is the caller's job. Forks that reuse these ABIs (SushiSwap and PancakeSwap
 //! V2 routers) decode the same way.
+//!
+//! ## Known limits
+//! Validation is strict ABI (abicoder v2), so a few inputs that the
+//! Universal Router or V2Router02 execute are rejected: dirty address or
+//! bool padding bits, V3 paths with trailing bytes, and short static command
+//! inputs. One rejected command makes the whole `execute` or `multicall`
+//! null. `PAY_PORTION_FULL_PRECISION` (`0x07`) and other untyped Universal
+//! Router commands arrive as `.other`.
 
 const std = @import("std");
 const keccak = @import("../keccak.zig");
@@ -89,7 +99,9 @@ pub const selectors = struct {
 // ============================================================================
 
 /// An ABI `address[]`, borrowed from calldata. Every element's 12 padding
-/// bytes were checked to be zero by `decode`.
+/// bytes were checked to be zero by `decode`, and `decode` guarantees
+/// `len() >= 2` (every swap path has a source and a destination token), so
+/// `first()` and `last()` are always valid.
 pub const AddressPath = struct {
     /// `len() * 32` bytes: the array's elements, one ABI word each.
     words: []const u8,
@@ -176,7 +188,10 @@ pub const U256Array = struct {
 };
 
 /// An ABI `bytes[]`, borrowed from calldata. `decode` checked every element's
-/// offset and length.
+/// offset and length, and that the array is canonical: element `i`'s offset
+/// is at or past element `i - 1`'s data end, rounded up to a 32-byte word.
+/// This rejects aliased or overlapping elements and keeps validation linear
+/// in `data.len`.
 pub const BytesArray = struct {
     /// The array's tail: starts at the first element's offset word, i.e.
     /// immediately after the length word. Element offsets are relative to it.
@@ -287,8 +302,8 @@ pub const Decoded = union(enum) {
     v2_swap_exact_eth_for_tokens_fot: V2EthExactIn,
     v2_swap_exact_tokens_for_eth_fot: V2ExactIn,
     // SwapRouter02 V2-style (deadline null)
-    v2_router02_swap_exact_tokens_for_tokens: V2ExactIn,
-    v2_router02_swap_tokens_for_exact_tokens: V2ExactOut,
+    swap_router02_swap_exact_tokens_for_tokens: V2ExactIn,
+    swap_router02_swap_tokens_for_exact_tokens: V2ExactOut,
     // V3 SwapRouter and SwapRouter02
     v3_exact_input_single: V3ExactInputSingle,
     v3_exact_input: V3ExactInput,
@@ -400,6 +415,11 @@ pub const UniversalRouterExecute = struct {
 };
 
 /// One Universal Router command.
+///
+/// The Dispatcher maps two recipient sentinels before use: `0x0…01` means
+/// `msg.sender` and `0x0…02` means the router itself (Dispatcher.sol:332-340).
+/// `decode` does not resolve the sentinel; every `recipient` field below
+/// carries the raw 20-byte value from calldata.
 pub const Command = struct {
     /// The raw command byte.
     raw: u8,
@@ -411,6 +431,9 @@ pub const Command = struct {
     /// layout of newer routers (path offset 0xc0); legacy five-field inputs
     /// (path offset 0xa0) leave it null.
     pub const V3SwapExactIn = struct {
+        /// Raw sentinel from calldata: `0x0…01` maps to `msg.sender` and
+        /// `0x0…02` to the router itself (Dispatcher.map); `decode` does not
+        /// resolve it.
         recipient: [20]u8,
         amount_in: u256,
         amount_out_min: u256,
@@ -421,6 +444,9 @@ pub const Command = struct {
 
     /// Same layout as `V3SwapExactIn`; `path` is reversed (token out first).
     pub const V3SwapExactOut = struct {
+        /// Raw sentinel from calldata: `0x0…01` maps to `msg.sender` and
+        /// `0x0…02` to the router itself (Dispatcher.map); `decode` does not
+        /// resolve it.
         recipient: [20]u8,
         amount_out: u256,
         amount_in_max: u256,
@@ -430,6 +456,9 @@ pub const Command = struct {
     };
 
     pub const V2SwapExactIn = struct {
+        /// Raw sentinel from calldata: `0x0…01` maps to `msg.sender` and
+        /// `0x0…02` to the router itself (Dispatcher.map); `decode` does not
+        /// resolve it.
         recipient: [20]u8,
         amount_in: u256,
         amount_out_min: u256,
@@ -439,6 +468,9 @@ pub const Command = struct {
     };
 
     pub const V2SwapExactOut = struct {
+        /// Raw sentinel from calldata: `0x0…01` maps to `msg.sender` and
+        /// `0x0…02` to the router itself (Dispatcher.map); `decode` does not
+        /// resolve it.
         recipient: [20]u8,
         amount_out: u256,
         amount_in_max: u256,
@@ -496,6 +528,12 @@ fn addChecked(a: usize, b: usize) ?usize {
 
 fn mulChecked(a: usize, b: usize) ?usize {
     return std.math.mul(usize, a, b) catch null;
+}
+
+/// Round `n` up to the next 32-byte word boundary, checked against overflow.
+fn roundUpWord(n: usize) ?usize {
+    const padded = addChecked(n, 31) orelse return null;
+    return padded & ~@as(usize, 31);
 }
 
 fn wordToUsize(w: u256) ?usize {
@@ -604,9 +642,13 @@ fn arrayHeadAt(data: []const u8, base: usize, offset_word_pos: usize) ?ArrayHead
     return .{ .start = head_start, .end = head_end, .count = count };
 }
 
-/// An `address[]`, validating every element's padding eagerly.
+/// An `address[]` swap path, validating every element's padding eagerly and
+/// requiring at least 2 elements (a swap path always has a source and a
+/// destination token; see UniswapV2Library.sol:63,74 and UR
+/// V2SwapRouter.sol:75,112).
 fn addressArrayAt(data: []const u8, base: usize, offset_word_pos: usize) ?AddressPath {
     const h = arrayHeadAt(data, base, offset_word_pos) orelse return null;
+    if (h.count < 2) return null;
     const words = data[h.start..h.end];
     var i: usize = 0;
     while (i < h.count) : (i += 1) {
@@ -621,11 +663,26 @@ fn u256ArrayAt(data: []const u8, base: usize, offset_word_pos: usize) ?U256Array
     return .{ .words = data[h.start..h.end] };
 }
 
-/// A `bytes[]` array's location (element validation happens at each call
-/// site, since what counts as "valid" differs between multicall and UR).
+/// A `bytes[]` array's location, requiring a canonical layout: element `i`'s
+/// offset must be at or past element `i - 1`'s data end, rounded up to a
+/// 32-byte word. This rejects aliased or overlapping elements and keeps
+/// validation linear in `data.len`. Used for both multicall calls and UR
+/// inputs, which share this requirement.
 fn bytesArrayAt(data: []const u8, base: usize, offset_word_pos: usize) ?BytesArray {
     const h = arrayHeadAt(data, base, offset_word_pos) orelse return null;
-    return .{ .head = data[h.start..], .count = h.count };
+    const head = data[h.start..];
+    var prev_end: usize = 0;
+    var i: usize = 0;
+    while (i < h.count) : (i += 1) {
+        const off = readOffset(head, i * 32) orelse return null;
+        if (i > 0 and off < prev_end) return null;
+        const elem_len = wordToUsize(readU256At(head, off) orelse return null) orelse return null;
+        const content_start = addChecked(off, 32) orelse return null;
+        const content_end = addChecked(content_start, elem_len) orelse return null;
+        if (content_end > head.len) return null;
+        prev_end = roundUpWord(content_end) orelse return null;
+    }
+    return .{ .head = head, .count = h.count };
 }
 
 /// `k` for a V3 packed path of this byte length, or null if it isn't
@@ -1006,8 +1063,8 @@ fn decodeDispatch(data: []const u8, allow_batch: bool) ?Decoded {
         selU32(selectors.swap_exact_tokens_for_tokens_fot) => Decoded{ .v2_swap_exact_tokens_for_tokens_fot = parseV2ExactIn(data, args_base, true) orelse return null },
         selU32(selectors.swap_exact_eth_for_tokens_fot) => Decoded{ .v2_swap_exact_eth_for_tokens_fot = parseV2EthExactIn(data, args_base) orelse return null },
         selU32(selectors.swap_exact_tokens_for_eth_fot) => Decoded{ .v2_swap_exact_tokens_for_eth_fot = parseV2ExactIn(data, args_base, true) orelse return null },
-        selU32(selectors.swap_exact_tokens_for_tokens_02) => Decoded{ .v2_router02_swap_exact_tokens_for_tokens = parseV2ExactIn(data, args_base, false) orelse return null },
-        selU32(selectors.swap_tokens_for_exact_tokens_02) => Decoded{ .v2_router02_swap_tokens_for_exact_tokens = parseV2ExactOut(data, args_base, false) orelse return null },
+        selU32(selectors.swap_exact_tokens_for_tokens_02) => Decoded{ .swap_router02_swap_exact_tokens_for_tokens = parseV2ExactIn(data, args_base, false) orelse return null },
+        selU32(selectors.swap_tokens_for_exact_tokens_02) => Decoded{ .swap_router02_swap_tokens_for_exact_tokens = parseV2ExactOut(data, args_base, false) orelse return null },
         selU32(selectors.exact_input_single) => Decoded{ .v3_exact_input_single = parseV3ExactInputSingle(data, true) orelse return null },
         selU32(selectors.exact_input_single_02) => Decoded{ .v3_exact_input_single = parseV3ExactInputSingle(data, false) orelse return null },
         selU32(selectors.exact_output_single) => Decoded{ .v3_exact_output_single = parseV3ExactOutputSingle(data, true) orelse return null },
