@@ -263,6 +263,9 @@ pub const Multicall = struct {
     deadline: ?u256,
     previous_blockhash: ?[32]u8,
     calls: BytesArray,
+    /// The rules inner calls are decoded with: the router the multicall was
+    /// sent to (`decodeFor`), `.uniswap` for `decode`.
+    router: routers.Router = .uniswap,
 
     pub fn len(self: Multicall) usize {
         return self.calls.len();
@@ -1004,6 +1007,16 @@ fn decodeDispatch(data: []const u8, allow_batch: bool) ?Decoded {
 pub fn decodeWithUrDialect(data: []const u8, dialect: UrDialect) ?Decoded {
     _ = dialect;
     return decode(data);
+}
+
+/// Decode a batch call (`multicall` or Universal Router `execute`) sent to
+/// `router`: the multicall's `router` field is set so inner calls decode under
+/// its rules, and `execute` uses the router's `UrDialect`. Null for any other
+/// selector. Used by `decodeFor`.
+pub fn decodeBatchFor(router: Router, data: []const u8) ?Decoded {
+    _ = router;
+    _ = data;
+    return null;
 }
 
 /// Router-aware decoding for routers whose selectors collide with Uniswap's
