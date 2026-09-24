@@ -20,8 +20,23 @@
 const std = @import("std");
 const reader = @import("abi_reader.zig");
 
-const BytesArray = reader.BytesArray;
-const U256Array = reader.U256Array;
+pub const BytesArray = reader.BytesArray;
+pub const U256Array = reader.U256Array;
+
+const addChecked = reader.addChecked;
+const roundUpWord = reader.roundUpWord;
+const wordToUsize = reader.wordToUsize;
+const readU256At = reader.readU256At;
+const readOffset = reader.readOffset;
+const readAddressAt = reader.readAddressAt;
+const readBoolAt = reader.readBoolAt;
+const readFeeAt = reader.readFeeAt;
+const readUintAt = reader.readUintAt;
+const readIntAt = reader.readIntAt;
+const bytesAt = reader.bytesAt;
+const arrayHeadAt = reader.arrayHeadAt;
+const bytesArrayAt = reader.bytesArrayAt;
+const u256ArrayAt = reader.u256ArrayAt;
 
 /// v4-periphery Actions.sol values for the actions V4Router executes.
 pub const actions = struct {
@@ -61,15 +76,14 @@ pub const PathKeys = struct {
     count: usize,
 
     pub fn len(self: PathKeys) usize {
-        _ = self;
-        @panic("todo");
+        return self.count;
     }
 
     /// Element `i`. Asserts `i < len()`.
     pub fn get(self: PathKeys, i: usize) PathKey {
-        _ = self;
-        _ = i;
-        @panic("todo");
+        std.debug.assert(i < self.count);
+        const off = readOffset(self.head, i * 32) orelse unreachable;
+        return readPathKeyAt(self.head, off) orelse unreachable;
     }
 };
 
@@ -168,8 +182,26 @@ pub const Plan = struct {
         index: usize = 0,
 
         pub fn next(self: *Iterator) ?Action {
-            _ = self;
-            @panic("todo");
+            if (self.index >= self.actions.len) return null;
+            const raw = self.actions[self.index];
+            const param = self.params.get(self.index);
+            self.index += 1;
+            const payload: Action.Payload = switch (raw) {
+                actions.swap_exact_in_single => .{ .swap_exact_in_single = parseExactInputSingle(param) orelse unreachable },
+                actions.swap_exact_in => .{ .swap_exact_in = parseExactInput(param) orelse unreachable },
+                actions.swap_exact_out_single => .{ .swap_exact_out_single = parseExactOutputSingle(param) orelse unreachable },
+                actions.swap_exact_out => .{ .swap_exact_out = parseExactOutput(param) orelse unreachable },
+                actions.settle => blk: {
+                    const f = parseSettle(param) orelse unreachable;
+                    break :blk .{ .settle = .{ .currency = f.currency, .amount = f.amount, .payer_is_user = f.payer_is_user } };
+                },
+                actions.settle_all => .{ .settle_all = parseSettleAll(param) orelse unreachable },
+                actions.take => .{ .take = parseTake(param) orelse unreachable },
+                actions.take_all => .{ .take_all = parseTakeAll(param) orelse unreachable },
+                actions.take_portion => .{ .take_portion = parseTakePortion(param) orelse unreachable },
+                else => .{ .other = .{ .action = raw, .params = param } },
+            };
+            return .{ .raw = raw, .payload = payload };
         }
     };
 };
@@ -177,6 +209,280 @@ pub const Plan = struct {
 /// Parse and fully validate a `V4_SWAP` command input. Null for anything
 /// malformed; never panics.
 pub fn parsePlan(input: []const u8) ?Plan {
-    _ = input;
+    const acts = bytesAt(input, 0, 0) orelse return null;
+    const params = bytesArrayAt(input, 0, 32) orelse return null;
+    if (acts.len != params.count) return null;
+
+    var i: usize = 0;
+    while (i < acts.len) : (i += 1) {
+        const param = params.get(i);
+        const ok = switch (acts[i]) {
+            actions.swap_exact_in_single => parseExactInputSingle(param) != null,
+            actions.swap_exact_in => parseExactInput(param) != null,
+            actions.swap_exact_out_single => parseExactOutputSingle(param) != null,
+            actions.swap_exact_out => parseExactOutput(param) != null,
+            actions.settle => parseSettle(param) != null,
+            actions.settle_all => parseSettleAll(param) != null,
+            actions.take => parseTake(param) != null,
+            actions.take_all => parseTakeAll(param) != null,
+            actions.take_portion => parseTakePortion(param) != null,
+            else => true,
+        };
+        if (!ok) return null;
+    }
+    return .{ .actions = acts, .params = params };
+}
+
+// ============================================================================
+// Decoding: PoolKey / PathKey field readers
+// ============================================================================
+
+/// `PoolKey` is a static 5-word tuple, inlined wherever it appears.
+fn readPoolKey(data: []const u8, base: usize) ?PoolKey {
+    const p_currency1 = addChecked(base, 0x20) orelse return null;
+    const p_fee = addChecked(base, 0x40) orelse return null;
+    const p_tick = addChecked(base, 0x60) orelse return null;
+    const p_hooks = addChecked(base, 0x80) orelse return null;
+    const currency0 = readAddressAt(data, base) orelse return null;
+    const currency1 = readAddressAt(data, p_currency1) orelse return null;
+    const fee = readFeeAt(data, p_fee) orelse return null;
+    const tick_spacing = readIntAt(i24, data, p_tick) orelse return null;
+    const hooks = readAddressAt(data, p_hooks) orelse return null;
+    return .{ .currency0 = currency0, .currency1 = currency1, .fee = fee, .tick_spacing = tick_spacing, .hooks = hooks };
+}
+
+/// `PathKey` is a dynamic tuple (4 static words + a trailing `bytes
+/// hookData`): `off` is the tuple's start, relative to `data`.
+fn readPathKeyAt(data: []const u8, off: usize) ?PathKey {
+    const p_fee = addChecked(off, 0x20) orelse return null;
+    const p_tick = addChecked(off, 0x40) orelse return null;
+    const p_hooks = addChecked(off, 0x60) orelse return null;
+    const p_hook_data_off = addChecked(off, 0x80) orelse return null;
+    const intermediate_currency = readAddressAt(data, off) orelse return null;
+    const fee = readFeeAt(data, p_fee) orelse return null;
+    const tick_spacing = readIntAt(i24, data, p_tick) orelse return null;
+    const hooks = readAddressAt(data, p_hooks) orelse return null;
+    const hook_data = bytesAt(data, off, p_hook_data_off) orelse return null;
+    return .{
+        .intermediate_currency = intermediate_currency,
+        .fee = fee,
+        .tick_spacing = tick_spacing,
+        .hooks = hooks,
+        .hook_data = hook_data,
+    };
+}
+
+/// A `PathKey[]`, validated the way `bytesArrayAt` validates `bytes[]`:
+/// canonical, non-overlapping element order, checked linear in `data.len`.
+/// Each element is a dynamic tuple (4 static words, then `bytes hookData`),
+/// so an element's data end is the later of its fixed 0xA0-byte head and its
+/// `hookData` content end.
+fn pathKeysAt(data: []const u8, base: usize, offset_word_pos: usize) ?PathKeys {
+    const h = arrayHeadAt(data, base, offset_word_pos) orelse return null;
+    const head = data[h.start..];
+    var prev_end: usize = 0;
+    var i: usize = 0;
+    while (i < h.count) : (i += 1) {
+        const off = readOffset(head, i * 32) orelse return null;
+        if (i > 0 and off < prev_end) return null;
+        if (readPathKeyAt(head, off) == null) return null;
+
+        const p_hook_data_off = addChecked(off, 0x80) orelse return null;
+        const hd_off = readOffset(head, p_hook_data_off) orelse return null;
+        const hd_start = addChecked(off, hd_off) orelse return null;
+        const hd_len = wordToUsize(readU256At(head, hd_start) orelse return null) orelse return null;
+        const hd_content_start = addChecked(hd_start, 32) orelse return null;
+        const hd_content_end = addChecked(hd_content_start, hd_len) orelse return null;
+        if (hd_content_end > head.len) return null;
+
+        const tuple_end = addChecked(off, 0xA0) orelse return null;
+        const elem_end = @max(tuple_end, hd_content_end);
+        prev_end = roundUpWord(elem_end) orelse return null;
+    }
+    return .{ .head = head, .count = h.count };
+}
+
+// ============================================================================
+// Decoding: single-hop / multi-hop struct layout detection
+//
+// "struct = params + word0" (CalldataDecoder.sol): every swap action's
+// params is `abi.encode(StructType)`, a lone dynamic tuple, so word0 of
+// params is the struct's own offset (usually 0x20; 0 for the degenerate
+// native-ETH case where the struct's first field is itself zero).
+// ============================================================================
+
+const SingleHopLayout = struct {
+    hook_data_offset_pos: usize,
+    min_hop_price_x36: ?u256,
+};
+
+/// Distinguish the live (no `minHopPriceX36`) and main (with it) single-hop
+/// struct layouts by the value of the word right after the two `uint128`
+/// amounts: in the live layout that word is the `hookData` offset (0x120);
+/// otherwise it must be `minHopPriceX36` and the *next* word must be the
+/// `hookData` offset (0x140). Anything else is malformed.
+fn singleHopLayout(data: []const u8, struct_base: usize) ?SingleHopLayout {
+    const live_pos = addChecked(struct_base, 0x100) orelse return null;
+    const live_word = readU256At(data, live_pos) orelse return null;
+    if (live_word == 0x120) {
+        return .{ .hook_data_offset_pos = live_pos, .min_hop_price_x36 = null };
+    }
+    const main_pos = addChecked(struct_base, 0x120) orelse return null;
+    const main_word = readU256At(data, main_pos) orelse return null;
+    if (main_word != 0x140) return null;
+    return .{ .hook_data_offset_pos = main_pos, .min_hop_price_x36 = live_word };
+}
+
+const MultiHopLayout = struct {
+    path_offset_pos: usize,
+    amount_a_pos: usize,
+    amount_b_pos: usize,
+    min_hop_price_x36: ?U256Array,
+};
+
+/// Distinguish the live (no `minHopPriceX36[]`) and main (with it) multi-hop
+/// struct layouts by the `path` offset value: 0x80 (4-word head: currency,
+/// path, amountA, amountB) or 0xa0 (5-word head, with a `minHopPriceX36[]`
+/// offset inserted after `path`). Anything else is malformed.
+fn multiHopLayout(data: []const u8, struct_base: usize) ?MultiHopLayout {
+    const path_offset_pos = addChecked(struct_base, 0x20) orelse return null;
+    const path_off = readU256At(data, path_offset_pos) orelse return null;
+    if (path_off == 0x80) {
+        const amount_a_pos = addChecked(struct_base, 0x40) orelse return null;
+        const amount_b_pos = addChecked(struct_base, 0x60) orelse return null;
+        return .{ .path_offset_pos = path_offset_pos, .amount_a_pos = amount_a_pos, .amount_b_pos = amount_b_pos, .min_hop_price_x36 = null };
+    }
+    if (path_off == 0xa0) {
+        const min_hop_offset_pos = addChecked(struct_base, 0x40) orelse return null;
+        const min_hop = u256ArrayAt(data, struct_base, min_hop_offset_pos) orelse return null;
+        const amount_a_pos = addChecked(struct_base, 0x60) orelse return null;
+        const amount_b_pos = addChecked(struct_base, 0x80) orelse return null;
+        return .{ .path_offset_pos = path_offset_pos, .amount_a_pos = amount_a_pos, .amount_b_pos = amount_b_pos, .min_hop_price_x36 = min_hop };
+    }
     return null;
+}
+
+// ============================================================================
+// Decoding: swap actions
+// ============================================================================
+
+fn parseExactInputSingle(param: []const u8) ?ExactInputSingle {
+    const struct_base = readOffset(param, 0) orelse return null;
+    const pool_key = readPoolKey(param, struct_base) orelse return null;
+    const p_zero_for_one = addChecked(struct_base, 0xA0) orelse return null;
+    const zero_for_one = readBoolAt(param, p_zero_for_one) orelse return null;
+    const p_amount_in = addChecked(struct_base, 0xC0) orelse return null;
+    const amount_in = readUintAt(u128, param, p_amount_in) orelse return null;
+    const p_amount_out_min = addChecked(struct_base, 0xE0) orelse return null;
+    const amount_out_minimum = readUintAt(u128, param, p_amount_out_min) orelse return null;
+    const layout = singleHopLayout(param, struct_base) orelse return null;
+    const hook_data = bytesAt(param, struct_base, layout.hook_data_offset_pos) orelse return null;
+    return .{
+        .pool_key = pool_key,
+        .zero_for_one = zero_for_one,
+        .amount_in = amount_in,
+        .amount_out_minimum = amount_out_minimum,
+        .min_hop_price_x36 = layout.min_hop_price_x36,
+        .hook_data = hook_data,
+    };
+}
+
+fn parseExactOutputSingle(param: []const u8) ?ExactOutputSingle {
+    const struct_base = readOffset(param, 0) orelse return null;
+    const pool_key = readPoolKey(param, struct_base) orelse return null;
+    const p_zero_for_one = addChecked(struct_base, 0xA0) orelse return null;
+    const zero_for_one = readBoolAt(param, p_zero_for_one) orelse return null;
+    const p_amount_out = addChecked(struct_base, 0xC0) orelse return null;
+    const amount_out = readUintAt(u128, param, p_amount_out) orelse return null;
+    const p_amount_in_max = addChecked(struct_base, 0xE0) orelse return null;
+    const amount_in_maximum = readUintAt(u128, param, p_amount_in_max) orelse return null;
+    const layout = singleHopLayout(param, struct_base) orelse return null;
+    const hook_data = bytesAt(param, struct_base, layout.hook_data_offset_pos) orelse return null;
+    return .{
+        .pool_key = pool_key,
+        .zero_for_one = zero_for_one,
+        .amount_out = amount_out,
+        .amount_in_maximum = amount_in_maximum,
+        .min_hop_price_x36 = layout.min_hop_price_x36,
+        .hook_data = hook_data,
+    };
+}
+
+fn parseExactInput(param: []const u8) ?ExactInput {
+    const struct_base = readOffset(param, 0) orelse return null;
+    const currency_in = readAddressAt(param, struct_base) orelse return null;
+    const layout = multiHopLayout(param, struct_base) orelse return null;
+    const path = pathKeysAt(param, struct_base, layout.path_offset_pos) orelse return null;
+    const amount_in = readUintAt(u128, param, layout.amount_a_pos) orelse return null;
+    const amount_out_minimum = readUintAt(u128, param, layout.amount_b_pos) orelse return null;
+    return .{
+        .currency_in = currency_in,
+        .path = path,
+        .min_hop_price_x36 = layout.min_hop_price_x36,
+        .amount_in = amount_in,
+        .amount_out_minimum = amount_out_minimum,
+    };
+}
+
+fn parseExactOutput(param: []const u8) ?ExactOutput {
+    const struct_base = readOffset(param, 0) orelse return null;
+    const currency_out = readAddressAt(param, struct_base) orelse return null;
+    const layout = multiHopLayout(param, struct_base) orelse return null;
+    const path = pathKeysAt(param, struct_base, layout.path_offset_pos) orelse return null;
+    const amount_out = readUintAt(u128, param, layout.amount_a_pos) orelse return null;
+    const amount_in_maximum = readUintAt(u128, param, layout.amount_b_pos) orelse return null;
+    return .{
+        .currency_out = currency_out,
+        .path = path,
+        .min_hop_price_x36 = layout.min_hop_price_x36,
+        .amount_out = amount_out,
+        .amount_in_maximum = amount_in_maximum,
+    };
+}
+
+// ============================================================================
+// Decoding: settle / take actions
+//
+// Each params blob is `abi.decode(params, (T1, T2, ...))`: a flat
+// concatenation of static fields, with no wrapping struct or leading offset
+// word (unlike the swap actions above).
+// ============================================================================
+
+const SettleFields = struct {
+    currency: [20]u8,
+    amount: u256,
+    payer_is_user: bool,
+};
+
+fn parseSettle(param: []const u8) ?SettleFields {
+    const currency = readAddressAt(param, 0) orelse return null;
+    const amount = readU256At(param, 0x20) orelse return null;
+    const payer_is_user = readBoolAt(param, 0x40) orelse return null;
+    return .{ .currency = currency, .amount = amount, .payer_is_user = payer_is_user };
+}
+
+fn parseSettleAll(param: []const u8) ?CurrencyAmount {
+    const currency = readAddressAt(param, 0) orelse return null;
+    const amount = readU256At(param, 0x20) orelse return null;
+    return .{ .currency = currency, .amount = amount };
+}
+
+fn parseTake(param: []const u8) ?CurrencyRecipientAmount {
+    const currency = readAddressAt(param, 0) orelse return null;
+    const recipient = readAddressAt(param, 0x20) orelse return null;
+    const amount = readU256At(param, 0x40) orelse return null;
+    return .{ .currency = currency, .recipient = recipient, .amount = amount };
+}
+
+fn parseTakeAll(param: []const u8) ?CurrencyAmount {
+    const currency = readAddressAt(param, 0) orelse return null;
+    const amount = readU256At(param, 0x20) orelse return null;
+    return .{ .currency = currency, .amount = amount };
+}
+
+fn parseTakePortion(param: []const u8) ?CurrencyRecipientAmount {
+    const currency = readAddressAt(param, 0) orelse return null;
+    const recipient = readAddressAt(param, 0x20) orelse return null;
+    const amount = readU256At(param, 0x40) orelse return null;
+    return .{ .currency = currency, .recipient = recipient, .amount = amount };
 }
